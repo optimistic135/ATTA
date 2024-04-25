@@ -1,5 +1,6 @@
 # Active Test-Time Adaptation: Theoretical Analyses and An Algorithm
 
+[![arXiv](https://img.shields.io/badge/arXiv-2404.05094-b31b1b.svg)](https://arxiv.org/abs/2404.05094)
 [![Static Badge](https://img.shields.io/badge/ICLR-2024-orange)](https://openreview.net/forum?id=YHUGlwTzFB)
 [![License][license-image]][license-url]
 
