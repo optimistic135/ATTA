@@ -5,6 +5,7 @@ schedule, so U measures supervision value conditional on it, not a new policy.
 """
 
 import copy
+import random
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +29,7 @@ def head_gradient(probabilities, features, labels):
 
 def rng_state():
     return (torch.get_rng_state(), torch.cuda.get_rng_state_all()
-            if torch.cuda.is_available() else None, np.random.get_state())
+            if torch.cuda.is_available() else None, np.random.get_state(), random.getstate())
 
 
 def restore_rng(state):
@@ -36,6 +37,7 @@ def restore_rng(state):
     if state[1] is not None:
         torch.cuda.set_rng_state_all(state[1])
     np.random.set_state(state[2])
+    random.setstate(state[3])
 
 
 class UtilitySimATTA(DelayedSimATTA):
@@ -89,6 +91,7 @@ class UtilitySimATTA(DelayedSimATTA):
         returned = sorted(set(self.received) - self.seen_returns)
         if returned:
             self.model.eval()
+            self.teacher.eval()
             batch_feat = self.model[0](self.current_data)
             batch_prob = self.model[1](batch_feat).softmax(1)
             pseudo = self.teacher(self.current_data).argmax(1)
@@ -114,6 +117,9 @@ class UtilitySimATTA(DelayedSimATTA):
                     "anchor_index": index, "sample_id": int(self.query_anchors.target[index]),
                     "delay": self.oracle.delay, "query_step": info["query_step"],
                     "return_step": row["step"],
+                    "returned_label": self.received[index],
+                    "query_prediction": int(old.argmax()),
+                    "return_prediction": int(p.argmax()),
                     "query_domain": self.experiment.domains[self.stream[info["query_step"]][0]],
                     "return_domain": self.experiment.domains[self.stream[row["step"]][0]],
                     "query_entropy": float(-(old * old.clamp_min(1e-12).log()).sum()),
@@ -203,7 +209,7 @@ class UtilitySimATTA(DelayedSimATTA):
                 encoding="utf-8")
             return []
         bank = self.bank()
-        rows = []
+        rows, traces = [], []
         # Cache at most one 20-batch input window. Models run one branch at a time.
         for step in sorted({event["return_step"] for event in self.events}):
             path = self.snapshot_dir / f"step_{step}.pt"
@@ -217,6 +223,7 @@ class UtilitySimATTA(DelayedSimATTA):
                                torch.tensor([int(y) for _, y in samples])))
             for event in (event for event in self.events if event["return_step"] == step):
                 accuracies = {}
+                branch_scores = {}
                 saved_rng = rng_state()
                 for branch in ("USE", "SKIP"):
                     restore_rng(saved_rng)
@@ -239,6 +246,7 @@ class UtilitySimATTA(DelayedSimATTA):
                             self.replay_update(model, self.history[step + offset], bank,
                                                self.config.random_seed + step + offset, skip)
                     accuracies[branch] = float(np.mean(scores)) if scores else None
+                    branch_scores[branch] = scores
                     del model
                 restore_rng(saved_rng)
                 complete = len(future) == self.horizon
@@ -247,8 +255,14 @@ class UtilitySimATTA(DelayedSimATTA):
                        "accuracy_use": use, "accuracy_skip": skip_score,
                        "utility": use - skip_score if use is not None else None}
                 rows.append(row)
+                for offset, (use_batch, skip_batch) in enumerate(
+                        zip(branch_scores["USE"], branch_scores["SKIP"]), 1):
+                    traces.append({"sample_id": event["sample_id"], "delay": self.oracle.delay,
+                                   "return_step": step, "future_step": step + offset,
+                                   "accuracy_use": use_batch, "accuracy_skip": skip_batch})
                 print(f"utility D={self.oracle.delay} step={step} "
                       f"sample={event['sample_id']} U={row['utility']}", flush=True)
             path.unlink()  # Disposable snapshots; keep auditable event results.
             write_csv(self.output_dir / "utilities.csv", rows)
+            write_csv(self.output_dir / "future_scores.csv", traces)
         return rows
