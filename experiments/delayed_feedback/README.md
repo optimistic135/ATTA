@@ -2,6 +2,10 @@
 
 新增入口独立于原有 `ATTA`、配置和 README；不改变原始 SimATTA 的调用行为。
 
+VLCS 使用相同的延迟实验协议、双卡调度与进度条，运行入口为
+`python -m experiments.delayed_feedback.run_vlcs --dataset-root datasets --gpus 0 1`。
+其域顺序、模型路径和输出说明见 [VLCS.md](VLCS.md)。不传 `--dataset` 的原入口仍默认 PACS。
+
 ## 运行
 
 在安装好原项目依赖的实验机器上，从仓库根目录执行：
