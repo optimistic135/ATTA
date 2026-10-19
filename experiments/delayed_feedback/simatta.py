@@ -57,12 +57,41 @@ class DelayedSimATTA(SimATTA):
         if candidates == 0:
             return outputs
         clusters = max(1, min(int(self.n_clusters), candidates))
-        outputs, _, self.query_anchors = self.sample_select(
-            self.model, data, stream_ids, self.query_anchors, clusters, 1,
-            ent_bound=self.config.atta.SimATTA.eh,
-            incremental_cluster=self.target_cluster,
-        )
+        self._selecting_queries = True
+        try:
+            outputs, _, self.query_anchors = self.sample_select(
+                self.model, data, stream_ids, self.query_anchors, clusters, 1,
+                ent_bound=self.config.atta.SimATTA.eh,
+                incremental_cluster=self.target_cluster,
+            )
+        finally:
+            self._selecting_queries = False
         return outputs
+
+    def update_anchors(self, anchors, data, target, feats, weight):
+        """Coalesce repeated query IDs before they enter memory or the oracle.
+
+        The original selector finds nearest images independently for each
+        centre, so multiple centres may pick the same image. Keep its first
+        occurrence and sum the represented cluster weights. Other callers use
+        class labels (including repeated ones), not stream IDs, and are unchanged.
+        """
+        if getattr(self, "_selecting_queries", False) and len(target):
+            groups = {}
+            first_positions, inverse = [], []
+            for position, sample_id in enumerate(target.tolist()):
+                if sample_id not in groups:
+                    groups[sample_id] = len(first_positions)
+                    first_positions.append(position)
+                inverse.append(groups[sample_id])
+            if len(first_positions) != len(target):
+                keep = torch.tensor(first_positions, dtype=torch.long, device=target.device)
+                merged_weight = weight.new_zeros(len(first_positions))
+                merged_weight.index_add_(0, torch.tensor(inverse, dtype=torch.long,
+                                                        device=weight.device), weight)
+                data, target, feats = data[keep], target[keep], feats[keep]
+                weight = merged_weight
+        return super().update_anchors(anchors, data, target, feats, weight)
 
     def labeled_anchors(self):
         if not self.received:
