@@ -15,6 +15,7 @@ from torch import nn
 
 from .protocol import DelayedOracle
 from .simatta import DelayedSimATTA
+from .run import DELAYS
 
 
 class QuerySelectionTests(unittest.TestCase):
@@ -52,7 +53,7 @@ class QuerySelectionTests(unittest.TestCase):
         self.assertEqual(anchors.target.tolist(), [5262])
         self.assertEqual(anchors.num_elem(), 1)
         self.assertEqual(anchors.weight.tolist(), [3])
-        for delay in (0, 10, 20, 30):
+        for delay in DELAYS:
             oracle = DelayedOracle(delay)
             for index, sample_id in enumerate(anchors.target.tolist()):
                 oracle.query(sample_id, index, 4, 0, "Sketch")

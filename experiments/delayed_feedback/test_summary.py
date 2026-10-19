@@ -25,6 +25,8 @@ class SummaryTests(unittest.TestCase):
             with (path / "summary.csv").open(newline="") as stream:
                 rows = list(csv.DictReader(stream))
             self.assertEqual(len(rows), 4)
+            self.assertEqual([int(row["delay"]) for row in rows], [0, 20, 50, 100])
+            self.assertIn("batch size=32", (path / "summary.md").read_text())
             self.assertEqual(float(rows[0]["Art_accuracy_pct_mean"]), 70)
             self.assertEqual(float(rows[0]["Art_accuracy_pct_std"]), 10)
 

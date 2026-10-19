@@ -6,10 +6,24 @@ import tempfile
 import unittest
 
 from .datasets import EXPERIMENTS
-from .run import DELAYS, parser, summarize, validate_inputs
+from .run import BATCH_SIZE, DELAYS, config_arguments, parser, summarize, validate_inputs
 
 
 class VLCSTests(unittest.TestCase):
+    def test_both_workers_override_original_batch_size_and_use_new_delays(self):
+        self.assertEqual(BATCH_SIZE, 32)
+        self.assertEqual(DELAYS, (0, 20, 50, 100))
+        for dataset in ("PACS", "VLCS"):
+            with self.subTest(dataset=dataset):
+                args = parser(dataset).parse_args(["--gpu-idx", "0"])
+                arguments = config_arguments(args)
+                self.assertEqual(arguments[arguments.index("--atta.batch_size") + 1], "32")
+                self.assertEqual(arguments[arguments.index("--config_path") + 1],
+                                 str(EXPERIMENTS[dataset].config_path))
+                for delay in DELAYS:
+                    self.assertEqual(parser(dataset).parse_args(
+                        ["--delay", str(delay)]).delay, delay)
+
     def test_defaults_select_caltech_source_weights(self):
         experiment = EXPERIMENTS["VLCS"]
         self.assertEqual(experiment.source, "Caltech101")
@@ -57,11 +71,13 @@ class VLCSTests(unittest.TestCase):
             with (output / "summary.csv").open(newline="") as stream:
                 summary = list(csv.DictReader(stream))
             self.assertEqual(len(summary), 4)
+            self.assertEqual([int(row["delay"]) for row in summary], [0, 20, 50, 100])
             self.assertEqual(float(summary[0]["LabelMe_accuracy_pct_mean"]), 70)
             self.assertEqual(float(summary[0]["VOC2007_accuracy_pct_std"]), 10)
             self.assertNotIn("Art_accuracy_pct_mean", summary[0])
             markdown = (output / "summary.md").read_text(encoding="utf-8")
             self.assertIn("# VLCS", markdown)
+            self.assertIn("batch size=32", markdown)
             self.assertIn("Caltech101 → LabelMe → SUN09 → VOC2007", markdown)
 
 

@@ -2,6 +2,12 @@
 
 新增入口独立于原有 `ATTA`、配置和 README；不改变原始 SimATTA 的调用行为。
 
+当前 PACS、VLCS 延迟验证统一使用 **batch size=32、D=0/20/50/100**。
+入口会覆盖原 YAML 中的 `atta.batch_size`，并把实际 batch size 写入 manifest、
+每次运行的 settings 和汇总表。原始算法配置与 Utility Prediction 入口不变。
+所有 D 继续复用同一组三个 seed，每个数据集仍为12次运行。
+延迟按 batch 计量，因此新结果与此前 batch size=100、D=0/10/20/30 的结果应分开保存和报告。
+
 VLCS 使用相同的延迟实验协议、双卡调度与进度条，运行入口为
 `python -m experiments.delayed_feedback.run_vlcs --dataset-root datasets --gpus 0 1`。
 其域顺序、模型路径和输出说明见 [VLCS.md](VLCS.md)。不传 `--dataset` 的原入口仍默认 PACS。
@@ -50,6 +56,20 @@ nohup python -u -m experiments.delayed_feedback.run \
 `PACS/photo`、`PACS/sketch`，每个目录内是按类别组织的图片。
 不自动下载数据，不自动训练源模型。
 
+例如使用新设置在单卡上分别运行两个数据集（输出目录必须尚不存在）：
+
+```bash
+python -u -m experiments.delayed_feedback.run \
+  --dataset-root /home/user3/chenc/workspace/git-rep/ATTA/datasets \
+  --gpu-idx 0 --seeds 110 123 456 \
+  --output-dir storage/delayed_feedback/pacs_bs32
+
+python -u -m experiments.delayed_feedback.run_vlcs \
+  --dataset-root /home/user3/chenc/workspace/git-rep/ATTA/datasets \
+  --gpu-idx 0 --seeds 110 123 456 \
+  --output-dir storage/delayed_feedback/vlcs_bs32
+```
+
 默认加载仓库现有 round1 的 Photo checkpoint：
 
 ```text
@@ -61,7 +81,7 @@ storage/checkpoints/round1/PACS/[2, 0, 1, 3]/ResNet18_3l_meanpool_0dp_Truefzbn/0
 三个 seed 衡量数据流与适应随机性的影响，不包含源模型重训练方差。
 原模型构造仍使用 torchvision 的 ImageNet 预训练初始化；离线运行时需预先准备其权重缓存。
 
-首次运行随机抽取三个不重复的 seed，保存到 `manifest.json`，对 D=0、10、20、30
+首次运行随机抽取三个不重复的 seed，保存到 `manifest.json`，对 D=0、20、50、100
 逐一复用，共 12 次运行。每次使用独立子进程；某次失败后停止分派新任务，
 允许其他已启动任务结束并保存成功结果，不把未完成的结果当成完整均值。
 默认 `--num-workers 0`，该值是每个实验进程的数据加载子进程数，可按实验机器资源调整。
@@ -82,7 +102,7 @@ python -m experiments.delayed_feedback.run \
 
 ## 实验口径
 
-- Photo 源模型，Art → Cartoon → Sketch 连续适应；batch size=100，保留不足 100 张的最后一批。
+- Photo 源模型，Art → Cartoon → Sketch 连续适应；batch size=32，保留不足 32 张的最后一批。
 - 沿用原 `configs/TTA_configs/PACS/SimATTA.yaml` 参数、聚类选样、低熵伪标签分支和训练目标。
 - 每域内部按 seed 随机无放回遍历。跨 D 使用相同 seed，因而输入顺序相同；模型演化不同，主动选择的样本和查询数可能不同。
 - 本实验保留原 SimATTA 的查询数量机制，没有新增固定查询比例或预算截断。
@@ -105,7 +125,7 @@ python -m experiments.delayed_feedback.run \
 
 | D | Art准确率 | Cartoon准确率 | Sketch准确率 | 全流准确率 | 查询数 | 返回数 | 跨域返回数 | 跨域比例 | 未返回数 |
 |---|---|---|---|---|---|---|---|---|---|
-| 0 / 10 / 20 / 30 | 三个seed均值±标准差 | 同左 | 同左 | 同左 | 同左 | 同左 | 同左 | 同左 | 同左 |
+| 0 / 20 / 50 / 100 | 三个seed均值±标准差 | 同左 | 同左 | 同左 | 同左 | 同左 | 同左 | 同左 | 同左 |
 
 所有准确率与比例使用百分数。准确率基于更新前首次预测；全流准确率按样本数加权，
 不是三个域准确率的算术平均。`summary.csv` 另有域宏平均。

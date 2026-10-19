@@ -61,8 +61,8 @@ storage/checkpoints/round1/VLCS/[0, 1, 2, 3]/ResNet18_3l_meanpool_0dp_Truefzbn/0
 |---|---|
 | 源域 | Caltech101（C，编号 0） |
 | 目标流 | LabelMe（L）→ SUN09（S）→ VOC2007（V） |
-| batch size | 100，保留最后不足 100 张的一批 |
-| 延迟 D | 0、10、20、30 个 batch |
+| batch size | 32，保留最后不足 32 张的一批 |
+| 延迟 D | 0、20、50、100 个 batch |
 | 随机 seed | 随机生成 3 个，不同 D 复用，共 12 次运行 |
 | 反馈规则 | t 步查询，t+D 步预测结束后返回 |
 | 跨域比例 | 跨域返回标签数 / 已返回标签数 |

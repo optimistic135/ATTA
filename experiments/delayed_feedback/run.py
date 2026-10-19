@@ -24,7 +24,8 @@ from .datasets import EXPERIMENTS
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CHECKPOINT = EXPERIMENTS["PACS"].checkpoint_dir
-DELAYS = (0, 10, 20, 30)
+DELAYS = (0, 20, 50, 100)
+BATCH_SIZE = 32
 METRICS = EXPERIMENTS["PACS"].metrics
 
 
@@ -90,6 +91,18 @@ def validate_inputs(args):
         raise ValueError("num-workers must be nonnegative")
 
 
+def config_arguments(args):
+    """Override the original batch size for both dataset worker entrypoints."""
+    experiment = EXPERIMENTS[args.dataset]
+    return [
+        "--config_path", str(experiment.config_path),
+        "--exp_round", "1", "--ckpt_dir", str(args.checkpoint_dir),
+        "--dataset.dataset_root", str(args.dataset_root),
+        "--gpu_idx", str(args.gpu_idx), "--num_workers", str(args.num_workers),
+        "--atta.batch_size", str(BATCH_SIZE),
+    ]
+
+
 def run_worker(args):
     multiprocessing.set_start_method("spawn", force=True)
     import torch
@@ -110,12 +123,7 @@ def run_worker(args):
     validate_inputs(args)
     experiment = EXPERIMENTS[args.dataset]
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    config = config_summoner(args_parser([
-        "--config_path", str(experiment.config_path),
-        "--exp_round", "1", "--ckpt_dir", str(args.checkpoint_dir),
-        "--dataset.dataset_root", str(args.dataset_root),
-        "--gpu_idx", str(args.gpu_idx), "--num_workers", str(args.num_workers),
-    ]))
+    config = config_summoner(args_parser(config_arguments(args)))
     # process_configs derives a seed from exp_round. Override AFTER it runs so
     # all workers load round1 weights while honoring the requested stream seed.
     config.random_seed = args.seed
@@ -123,11 +131,11 @@ def run_worker(args):
             or tuple(config.dataset.test_envs) != experiment.environments):
         raise ValueError(f"This experiment requires {experiment.name}: "
                          f"{' -> '.join((experiment.source,) + experiment.targets)}")
-    if config.atta.batch_size != 100:
-        raise ValueError("This experiment requires batch_size=100")
+    if config.atta.batch_size != BATCH_SIZE:
+        raise ValueError(f"This experiment requires batch_size={BATCH_SIZE}")
     reset_random_seed(config)
     dump_json(args.output_dir / "settings.json", {
-        "seed": args.seed, "delay": args.delay, "batch_size": 100,
+        "seed": args.seed, "delay": args.delay, "batch_size": config.atta.batch_size,
         "dataset": experiment.name,
         "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
         "device": str(config.device), "gpu_idx": args.gpu_idx,
@@ -178,7 +186,7 @@ def summarize(rows, output_dir, dataset="PACS"):
     (output_dir / "summary.md").write_text(
         f"# {experiment.name} SimATTA 标签延迟反馈\n\n"
         + " → ".join((experiment.source,) + experiment.targets)
-        + "；batch size=100。数值为三个 seed 的均值 ± 样本标准差。\n\n"
+        + f"；batch size={BATCH_SIZE}。数值为三个 seed 的均值 ± 样本标准差。\n\n"
         + text + "\n跨域比例＝跨域返回数/已返回数；未返回标签不计入分母。"
         "比例先按 seed 计算再取均值；无返回的 seed 记为 N/A，summary.csv 记录有效 n。\n",
         encoding="utf-8",
@@ -217,7 +225,7 @@ def main(default_dataset="PACS"):
         "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
         "checkpoint_sha256": {name: sha256(args.checkpoint_dir / name)
                               for name in experiment.checkpoint_names},
-        "python": sys.version, "batch_size": 100,
+        "python": sys.version, "batch_size": BATCH_SIZE,
         "gpus": gpus, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "source": experiment.source, "target_order": list(experiment.targets),
     })
