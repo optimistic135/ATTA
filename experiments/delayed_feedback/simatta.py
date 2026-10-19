@@ -8,6 +8,7 @@ import torch
 
 from ATTA.kernel.algorithms.SimATTA import SimATTA
 from .protocol import DelayedOracle
+from .datasets import EXPERIMENTS
 
 
 DOMAIN_NAMES = {0: "Art", 1: "Cartoon", 2: "Photo", 3: "Sketch"}
@@ -25,6 +26,7 @@ def write_csv(path, rows):
 class DelayedSimATTA(SimATTA):
     def __init__(self, config, delay):
         super().__init__(config)
+        self.experiment = EXPERIMENTS[config.dataset.name]
         self.oracle = DelayedOracle(delay)
         # Selection memory contains stream IDs, never true target labels. Pending
         # queries still participate in clustering, but not in supervised updates.
@@ -78,7 +80,7 @@ class DelayedSimATTA(SimATTA):
         batch_rows, domain_rows = [], []
         global_step, sample_offset = 0, 0
         for env_id in self.config.dataset.test_envs[1:]:
-            domain = DOMAIN_NAMES[env_id]
+            domain = self.experiment.domains[env_id]
             correct_total, sample_total = 0, 0
             total_batches = len(self.fast_loader[env_id])
             if progress is not None:
