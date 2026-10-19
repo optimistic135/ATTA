@@ -1,4 +1,4 @@
-"""Run twelve isolated PACS experiments and summarize their measured results.
+"""Run twelve isolated PACS or VLCS experiments and summarize their measured results.
 
 Usage (from repository root): python -m experiments.delayed_feedback.run
 Model dependencies are imported only inside a worker; --help uses the standard library.
@@ -19,24 +19,22 @@ from datetime import datetime, timezone
 
 from .scheduler import run_jobs
 from .progress import ProgressDisplay, emit_progress, parse_progress
+from .datasets import EXPERIMENTS
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CHECKPOINT = (ROOT / "storage/checkpoints/round1/PACS/[2, 0, 1, 3]"
-                      / "ResNet18_3l_meanpool_0dp_Truefzbn/0.0001lr_0.0wd/ERM_no_param")
+DEFAULT_CHECKPOINT = EXPERIMENTS["PACS"].checkpoint_dir
 DELAYS = (0, 10, 20, 30)
-METRICS = (
-    "Art_accuracy_pct", "Cartoon_accuracy_pct", "Sketch_accuracy_pct",
-    "stream_accuracy_pct", "domain_macro_accuracy_pct", "queried", "returned",
-    "cross_domain_returned", "cross_domain_pct", "pending",
-)
+METRICS = EXPERIMENTS["PACS"].metrics
 
 
-def parser():
+def parser(default_dataset="PACS"):
     cli = argparse.ArgumentParser(description=__doc__)
+    cli.add_argument("--dataset", choices=tuple(EXPERIMENTS), default=default_dataset)
     cli.add_argument("--dataset-root", type=Path, default=ROOT / "storage/datasets",
-                     help="Parent of PACS/art_painting, PACS/cartoon, PACS/photo, PACS/sketch")
-    cli.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT)
+                     help="Parent of the PACS/ or VLCS/ directory")
+    cli.add_argument("--checkpoint-dir", type=Path,
+                     help="Source checkpoint directory (default: dataset-specific round1)")
     cli.add_argument("--output-dir", type=Path,
                      help="New directory; existing directories are never overwritten")
     cli.add_argument("--seeds", type=int, nargs=3,
@@ -74,11 +72,17 @@ def sha256(path):
 
 
 def validate_inputs(args):
-    for domain in ("art_painting", "cartoon", "photo", "sketch"):
-        path = args.dataset_root / "PACS" / domain
-        if not path.is_dir():
-            raise FileNotFoundError(f"Missing PACS domain: {path}; automatic download is disabled")
-    for name in ("encoder_2.pth", "fc_2.pth"):
+    experiment = EXPERIMENTS[args.dataset]
+    folder = args.dataset_root / experiment.name
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Missing dataset: {folder}; automatic download is disabled")
+    # The original ImageFolder loader uses sorted folder names as numeric IDs.
+    # Reject extra/reordered domains so source weights cannot silently mismatch.
+    actual = tuple(sorted(path.name for path in folder.iterdir() if path.is_dir()))
+    if actual not in experiment.layouts:
+        raise ValueError(f"Unexpected {experiment.name} domains in {folder}: {actual}; "
+                         f"supported sorted layouts: {experiment.layouts}")
+    for name in experiment.checkpoint_names:
         path = args.checkpoint_dir / name
         if not path.is_file():
             raise FileNotFoundError(f"Missing source checkpoint: {path}; automatic training is disabled")
@@ -104,9 +108,10 @@ def run_worker(args):
     elif args.require_cuda:
         raise RuntimeError("--gpus requires CUDA; no CUDA GPU is available")
     validate_inputs(args)
+    experiment = EXPERIMENTS[args.dataset]
     args.output_dir.mkdir(parents=True, exist_ok=False)
     config = config_summoner(args_parser([
-        "--config_path", str(ROOT / "configs/TTA_configs/PACS/SimATTA.yaml"),
+        "--config_path", str(experiment.config_path),
         "--exp_round", "1", "--ckpt_dir", str(args.checkpoint_dir),
         "--dataset.dataset_root", str(args.dataset_root),
         "--gpu_idx", str(args.gpu_idx), "--num_workers", str(args.num_workers),
@@ -114,32 +119,36 @@ def run_worker(args):
     # process_configs derives a seed from exp_round. Override AFTER it runs so
     # all workers load round1 weights while honoring the requested stream seed.
     config.random_seed = args.seed
-    if config.dataset.name != "PACS" or list(config.dataset.test_envs) != [2, 0, 1, 3]:
-        raise ValueError("This experiment requires Photo -> Art -> Cartoon -> Sketch")
+    if (config.dataset.name != experiment.name
+            or tuple(config.dataset.test_envs) != experiment.environments):
+        raise ValueError(f"This experiment requires {experiment.name}: "
+                         f"{' -> '.join((experiment.source,) + experiment.targets)}")
     if config.atta.batch_size != 100:
         raise ValueError("This experiment requires batch_size=100")
     reset_random_seed(config)
     dump_json(args.output_dir / "settings.json", {
         "seed": args.seed, "delay": args.delay, "batch_size": 100,
+        "dataset": experiment.name,
         "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
         "device": str(config.device), "gpu_idx": args.gpu_idx,
         "torch_version": torch.__version__,
         "simatta": dict(config.atta.SimATTA), "num_workers": config.num_workers,
-        "source": "Photo", "target_order": ["Art", "Cartoon", "Sketch"],
+        "source": experiment.source, "target_order": list(experiment.targets),
     })
     algorithm = DelayedSimATTA(config, args.delay)
     result = algorithm.run_stream(args.output_dir, progress=emit_progress)
     dump_json(args.output_dir / "result.json", result)
 
 
-def summarize(rows, output_dir):
+def summarize(rows, output_dir, dataset="PACS"):
+    experiment = EXPERIMENTS[dataset]
     summaries = []
     for delay in DELAYS:
         group = [row for row in rows if row["delay"] == delay]
         if len(group) != 3 or len({row["seed"] for row in group}) != 3:
             raise ValueError(f"D={delay} must have three distinct, completed seeds")
         summary = {"delay": delay, "runs": len(group)}
-        for metric in METRICS:
+        for metric in experiment.metrics:
             values = [row[metric] for row in group if row[metric] is not None]
             summary[f"{metric}_mean"] = statistics.mean(values) if values else None
             summary[f"{metric}_std"] = statistics.stdev(values) if len(values) > 1 else None
@@ -154,9 +163,9 @@ def summarize(rows, output_dir):
             return "N/A"
         return f"{mean:.2f} ± {std:.2f}" if std is not None else f"{mean:.2f}"
 
-    columns = [
-        ("Art准确率(%)", "Art_accuracy_pct"), ("Cartoon准确率(%)", "Cartoon_accuracy_pct"),
-        ("Sketch准确率(%)", "Sketch_accuracy_pct"), ("全流准确率(%)", "stream_accuracy_pct"),
+    columns = [(f"{domain}准确率(%)", f"{domain}_accuracy_pct")
+               for domain in experiment.targets] + [
+        ("全流准确率(%)", "stream_accuracy_pct"),
         ("查询数", "queried"), ("返回数", "returned"),
         ("跨域返回数", "cross_domain_returned"), ("跨域比例(%)", "cross_domain_pct"),
         ("未返回数", "pending"),
@@ -167,8 +176,9 @@ def summarize(rows, output_dir):
         table.append(f"| {row['delay']} | " + " | ".join(cell(row, key) for _, key in columns) + " |")
     text = "\n".join(table) + "\n"
     (output_dir / "summary.md").write_text(
-        "# PACS SimATTA 标签延迟反馈\n\n"
-        "Photo → Art → Cartoon → Sketch；batch size=100。数值为三个 seed 的均值 ± 样本标准差。\n\n"
+        f"# {experiment.name} SimATTA 标签延迟反馈\n\n"
+        + " → ".join((experiment.source,) + experiment.targets)
+        + "；batch size=100。数值为三个 seed 的均值 ± 样本标准差。\n\n"
         + text + "\n跨域比例＝跨域返回数/已返回数；未返回标签不计入分母。"
         "比例先按 seed 计算再取均值；无返回的 seed 记为 N/A，summary.csv 记录有效 n。\n",
         encoding="utf-8",
@@ -176,10 +186,11 @@ def summarize(rows, output_dir):
     print(text, flush=True)
 
 
-def main():
-    args = parser().parse_args()
+def main(default_dataset="PACS"):
+    args = parser(default_dataset).parse_args()
+    experiment = EXPERIMENTS[args.dataset]
     args.dataset_root = args.dataset_root.resolve()
-    args.checkpoint_dir = args.checkpoint_dir.resolve()
+    args.checkpoint_dir = (args.checkpoint_dir or experiment.checkpoint_dir).resolve()
     if args.output_dir is not None:
         args.output_dir = args.output_dir.resolve()
     if args.worker:
@@ -192,19 +203,23 @@ def main():
     seeds = args.seeds if args.seeds is not None else random.SystemRandom().sample(range(1, 2**31), 3)
     if len(set(seeds)) != 3 or any(not 0 <= seed < 2**32 for seed in seeds):
         raise ValueError("Provide three distinct seeds in [0, 2**32)")
-    output = args.output_dir or (ROOT / "storage/delayed_feedback" /
+    output_base = ROOT / "storage/delayed_feedback"
+    if experiment.name != "PACS":
+        output_base = output_base / experiment.name
+    output = args.output_dir or (output_base /
                                 datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ"))
     output.mkdir(parents=True, exist_ok=False)
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                               capture_output=True, text=True, check=True).stdout.strip()
     dump_json(output / "manifest.json", {
         "seeds": seeds, "delays": list(DELAYS), "git_commit": revision,
+        "dataset": experiment.name,
         "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
         "checkpoint_sha256": {name: sha256(args.checkpoint_dir / name)
-                              for name in ("encoder_2.pth", "fc_2.pth")},
+                              for name in experiment.checkpoint_names},
         "python": sys.version, "batch_size": 100,
         "gpus": gpus, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-        "source": "Photo", "target_order": ["Art", "Cartoon", "Sketch"],
+        "source": experiment.source, "target_order": list(experiment.targets),
     })
     print(f"Seeds: {seeds}\nGPUs: {gpus}\nResults: {output}", flush=True)
     rows = []
@@ -213,6 +228,7 @@ def main():
         delay, seed = job
         run_dir = output / f"D{delay}" / f"seed_{seed}"
         command = [sys.executable, "-m", "experiments.delayed_feedback.run", "--worker",
+                   "--dataset", experiment.name,
                    "--delay", str(delay), "--seed", str(seed),
                    "--dataset-root", str(args.dataset_root),
                    "--checkpoint-dir", str(args.checkpoint_dir),
@@ -250,7 +266,7 @@ def main():
     jobs = [(delay, seed) for delay in DELAYS for seed in seeds]
     with ProgressDisplay(gpus, len(jobs)) as progress:
         run_jobs(jobs, gpus, launch, save_result)
-    summarize(rows, output)
+    summarize(rows, output, dataset=experiment.name)
 
 
 if __name__ == "__main__":
