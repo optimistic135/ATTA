@@ -1,0 +1,208 @@
+"""Run twelve isolated PACS experiments and summarize their measured results.
+
+Usage (from repository root): python -m experiments.delayed_feedback.run
+Dependencies are imported only inside a worker; --help uses the standard library.
+"""
+
+import argparse
+import csv
+import hashlib
+import json
+import multiprocessing
+from pathlib import Path
+import random
+import statistics
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CHECKPOINT = (ROOT / "storage/checkpoints/round1/PACS/[2, 0, 1, 3]"
+                      / "ResNet18_3l_meanpool_0dp_Truefzbn/0.0001lr_0.0wd/ERM_no_param")
+DELAYS = (0, 10, 20, 30)
+METRICS = (
+    "Art_accuracy_pct", "Cartoon_accuracy_pct", "Sketch_accuracy_pct",
+    "stream_accuracy_pct", "domain_macro_accuracy_pct", "queried", "returned",
+    "cross_domain_returned", "cross_domain_pct", "pending",
+)
+
+
+def parser():
+    cli = argparse.ArgumentParser(description=__doc__)
+    cli.add_argument("--dataset-root", type=Path, default=ROOT / "storage/datasets",
+                     help="Parent of PACS/art_painting, PACS/cartoon, PACS/photo, PACS/sketch")
+    cli.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT)
+    cli.add_argument("--output-dir", type=Path,
+                     help="New directory; existing directories are never overwritten")
+    cli.add_argument("--seeds", type=int, nargs=3,
+                     help="Optional three distinct seeds to reproduce a previous sweep")
+    cli.add_argument("--gpu-idx", type=int, default=0)
+    cli.add_argument("--num-workers", type=int, default=0)
+    cli.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    cli.add_argument("--delay", type=int, choices=DELAYS, help=argparse.SUPPRESS)
+    cli.add_argument("--seed", type=int, help=argparse.SUPPRESS)
+    return cli
+
+
+def dump_json(path, value):
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def write_csv(path, rows):
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def validate_inputs(args):
+    for domain in ("art_painting", "cartoon", "photo", "sketch"):
+        path = args.dataset_root / "PACS" / domain
+        if not path.is_dir():
+            raise FileNotFoundError(f"Missing PACS domain: {path}; automatic download is disabled")
+    for name in ("encoder_2.pth", "fc_2.pth"):
+        path = args.checkpoint_dir / name
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing source checkpoint: {path}; automatic training is disabled")
+    if args.num_workers < 0:
+        raise ValueError("num-workers must be nonnegative")
+
+
+def run_worker(args):
+    multiprocessing.set_start_method("spawn", force=True)
+    import torch
+    from ATTA import args_parser, config_summoner
+    from ATTA.utils.initial import reset_random_seed
+    from .simatta import DelayedSimATTA
+
+    if args.seed is None or args.delay is None or args.output_dir is None:
+        raise ValueError("Internal worker requires seed, delay and output-dir")
+    validate_inputs(args)
+    args.output_dir.mkdir(parents=True, exist_ok=False)
+    config = config_summoner(args_parser([
+        "--config_path", str(ROOT / "configs/TTA_configs/PACS/SimATTA.yaml"),
+        "--exp_round", "1", "--ckpt_dir", str(args.checkpoint_dir),
+        "--dataset.dataset_root", str(args.dataset_root),
+        "--gpu_idx", str(args.gpu_idx), "--num_workers", str(args.num_workers),
+    ]))
+    # process_configs derives a seed from exp_round. Override AFTER it runs so
+    # all workers load round1 weights while honoring the requested stream seed.
+    config.random_seed = args.seed
+    if config.dataset.name != "PACS" or list(config.dataset.test_envs) != [2, 0, 1, 3]:
+        raise ValueError("This experiment requires Photo -> Art -> Cartoon -> Sketch")
+    if config.atta.batch_size != 100:
+        raise ValueError("This experiment requires batch_size=100")
+    reset_random_seed(config)
+    dump_json(args.output_dir / "settings.json", {
+        "seed": args.seed, "delay": args.delay, "batch_size": 100,
+        "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
+        "device": str(config.device), "torch_version": torch.__version__,
+        "simatta": dict(config.atta.SimATTA), "num_workers": config.num_workers,
+        "source": "Photo", "target_order": ["Art", "Cartoon", "Sketch"],
+    })
+    algorithm = DelayedSimATTA(config, args.delay)
+    result = algorithm.run_stream(args.output_dir)
+    dump_json(args.output_dir / "result.json", result)
+
+
+def summarize(rows, output_dir):
+    summaries = []
+    for delay in DELAYS:
+        group = [row for row in rows if row["delay"] == delay]
+        if len(group) != 3 or len({row["seed"] for row in group}) != 3:
+            raise ValueError(f"D={delay} must have three distinct, completed seeds")
+        summary = {"delay": delay, "runs": len(group)}
+        for metric in METRICS:
+            values = [row[metric] for row in group if row[metric] is not None]
+            summary[f"{metric}_mean"] = statistics.mean(values) if values else None
+            summary[f"{metric}_std"] = statistics.stdev(values) if len(values) > 1 else None
+            summary[f"{metric}_n"] = len(values)
+        summaries.append(summary)
+    write_csv(output_dir / "per_seed.csv", rows)
+    write_csv(output_dir / "summary.csv", summaries)
+
+    def cell(summary, metric):
+        mean, std = summary[f"{metric}_mean"], summary[f"{metric}_std"]
+        if mean is None:
+            return "N/A"
+        return f"{mean:.2f} ± {std:.2f}" if std is not None else f"{mean:.2f}"
+
+    columns = [
+        ("Art准确率(%)", "Art_accuracy_pct"), ("Cartoon准确率(%)", "Cartoon_accuracy_pct"),
+        ("Sketch准确率(%)", "Sketch_accuracy_pct"), ("全流准确率(%)", "stream_accuracy_pct"),
+        ("查询数", "queried"), ("返回数", "returned"),
+        ("跨域返回数", "cross_domain_returned"), ("跨域比例(%)", "cross_domain_pct"),
+        ("未返回数", "pending"),
+    ]
+    table = ["| D(batch) | " + " | ".join(name for name, _ in columns) + " |",
+             "| " + " | ".join(["---:"] * (len(columns) + 1)) + " |"]
+    for row in summaries:
+        table.append(f"| {row['delay']} | " + " | ".join(cell(row, key) for _, key in columns) + " |")
+    text = "\n".join(table) + "\n"
+    (output_dir / "summary.md").write_text(
+        "# PACS SimATTA 标签延迟反馈\n\n"
+        "Photo → Art → Cartoon → Sketch；batch size=100。数值为三个 seed 的均值 ± 样本标准差。\n\n"
+        + text + "\n跨域比例＝跨域返回数/已返回数；未返回标签不计入分母。"
+        "比例先按 seed 计算再取均值；无返回的 seed 记为 N/A，summary.csv 记录有效 n。\n",
+        encoding="utf-8",
+    )
+    print(text, flush=True)
+
+
+def main():
+    args = parser().parse_args()
+    args.dataset_root = args.dataset_root.resolve()
+    args.checkpoint_dir = args.checkpoint_dir.resolve()
+    if args.output_dir is not None:
+        args.output_dir = args.output_dir.resolve()
+    if args.worker:
+        run_worker(args)
+        return
+    validate_inputs(args)
+    seeds = args.seeds if args.seeds is not None else random.SystemRandom().sample(range(1, 2**31), 3)
+    if len(set(seeds)) != 3 or any(not 0 <= seed < 2**32 for seed in seeds):
+        raise ValueError("Provide three distinct seeds in [0, 2**32)")
+    output = args.output_dir or (ROOT / "storage/delayed_feedback" /
+                                datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ"))
+    output.mkdir(parents=True, exist_ok=False)
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    dump_json(output / "manifest.json", {
+        "seeds": seeds, "delays": list(DELAYS), "git_commit": revision,
+        "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
+        "checkpoint_sha256": {name: sha256(args.checkpoint_dir / name)
+                              for name in ("encoder_2.pth", "fc_2.pth")},
+        "python": sys.version, "batch_size": 100,
+        "source": "Photo", "target_order": ["Art", "Cartoon", "Sketch"],
+    })
+    print(f"Seeds: {seeds}\nResults: {output}", flush=True)
+    rows = []
+    for delay in DELAYS:
+        for seed in seeds:
+            run_dir = output / f"D{delay}" / f"seed_{seed}"
+            command = [sys.executable, "-m", "experiments.delayed_feedback.run", "--worker",
+                       "--delay", str(delay), "--seed", str(seed),
+                       "--dataset-root", str(args.dataset_root),
+                       "--checkpoint-dir", str(args.checkpoint_dir),
+                       "--output-dir", str(run_dir), "--gpu-idx", str(args.gpu_idx),
+                       "--num-workers", str(args.num_workers)]
+            print(f"Starting D={delay}, seed={seed}", flush=True)
+            with (output / f"D{delay}_seed_{seed}.log").open("w", encoding="utf-8") as log:
+                subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=True)
+            rows.append(json.loads((run_dir / "result.json").read_text(encoding="utf-8")))
+            # Preserve all completed runs even if a later worker fails.
+            write_csv(output / "per_seed.csv", rows)
+    summarize(rows, output)
+
+
+if __name__ == "__main__":
+    main()
