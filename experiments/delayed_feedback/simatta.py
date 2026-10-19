@@ -72,7 +72,7 @@ class DelayedSimATTA(SimATTA):
                                    query.feats[indices], query.weight[indices])
 
     @torch.no_grad()
-    def run_stream(self, output_dir):
+    def run_stream(self, output_dir, progress=None):
         output_dir = Path(output_dir)
         self.enable_bn(self.model)
         batch_rows, domain_rows = [], []
@@ -80,6 +80,9 @@ class DelayedSimATTA(SimATTA):
         for env_id in self.config.dataset.test_envs[1:]:
             domain = DOMAIN_NAMES[env_id]
             correct_total, sample_total = 0, 0
+            total_batches = len(self.fast_loader[env_id])
+            if progress is not None:
+                progress({"event": "domain", "domain": domain, "total": total_batches})
             for domain_step, (data, target) in enumerate(self.fast_loader[env_id]):
                 data = data.to(self.config.device)
                 stream_ids = torch.arange(sample_offset, sample_offset + len(data))
@@ -134,9 +137,17 @@ class DelayedSimATTA(SimATTA):
                     "new_queries": current - previous, "new_returns": len(released),
                     **self.oracle.counts(),
                 })
-                print(f"D={self.oracle.delay} seed={self.config.random_seed} "
-                      f"step={global_step} {domain} acc={100 * correct / len(data):.2f}%",
-                      flush=True)
+                if progress is not None:
+                    progress({
+                        "event": "batch", "domain": domain, "total": total_batches,
+                        "completed": domain_step + 1,
+                        "accuracy_pct": 100.0 * correct_total / sample_total,
+                        **self.oracle.counts(),
+                    })
+                else:
+                    print(f"D={self.oracle.delay} seed={self.config.random_seed} "
+                          f"step={global_step} {domain} acc={100 * correct / len(data):.2f}%",
+                          flush=True)
                 sample_offset += len(data)
                 global_step += 1
             domain_rows.append({

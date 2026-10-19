@@ -30,6 +30,18 @@ nohup python -u -m experiments.delayed_feedback.run \
   > delayed_feedback.log 2>&1 &
 ```
 
+### 进度展示
+
+在交互终端前台执行时，默认显示 tqdm 进度条：一条展示全部 12 个实验的完成进度，
+每张 GPU 各有一条，展示当前 D、seed、域、已完成/总 batch 数、耗时、预计剩余时间和处理速度。
+域内每完成一批，更新累计在线准确率（`acc`）、已返回标签数（`returned`）和等待标签数（`pending`）。
+域切换时该卡进度条重新计数；等待模型加载时显示 `loading`。
+
+两个子进程只上报进度，由主进程统一绘制，避免双卡进度互相覆盖。
+各实验的原始日志继续保存到 `D*_seed_*.log`。
+`nohup` 或重定向到文件时改为逐行进度记录，可用 `tail -f delayed_feedback.log` 查看，
+不会在日志中写入用于移动终端光标的多行进度条。
+
 `--dataset-root` 下必须已有 `PACS/art_painting`、`PACS/cartoon`、
 `PACS/photo`、`PACS/sketch`，每个目录内是按类别组织的图片。
 不自动下载数据，不自动训练源模型。

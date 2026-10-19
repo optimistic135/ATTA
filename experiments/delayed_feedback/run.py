@@ -1,7 +1,7 @@
 """Run twelve isolated PACS experiments and summarize their measured results.
 
 Usage (from repository root): python -m experiments.delayed_feedback.run
-Dependencies are imported only inside a worker; --help uses the standard library.
+Model dependencies are imported only inside a worker; --help uses the standard library.
 """
 
 import argparse
@@ -18,6 +18,7 @@ import sys
 from datetime import datetime, timezone
 
 from .scheduler import run_jobs
+from .progress import ProgressDisplay, emit_progress, parse_progress
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -127,7 +128,7 @@ def run_worker(args):
         "source": "Photo", "target_order": ["Art", "Cartoon", "Sketch"],
     })
     algorithm = DelayedSimATTA(config, args.delay)
-    result = algorithm.run_stream(args.output_dir)
+    result = algorithm.run_stream(args.output_dir, progress=emit_progress)
     dump_json(args.output_dir / "result.json", result)
 
 
@@ -219,10 +220,18 @@ def main():
                    "--num-workers", str(args.num_workers)]
         if args.gpus is not None:
             command.append("--require-cuda")
-        print(f"Starting D={delay}, seed={seed}, GPU={gpu}", flush=True)
+        progress.start(gpu, delay, seed)
         log_path = output / f"D{delay}_seed_{seed}.log"
         with log_path.open("w", encoding="utf-8") as log:
-            process = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+            with subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True,
+                                  encoding="utf-8", errors="replace", bufsize=1) as process:
+                for line in process.stdout:
+                    log.write(line)
+                    log.flush()
+                    event = parse_progress(line)
+                    if event is not None:
+                        progress.update(gpu, event)
         if process.returncode:
             raise RuntimeError(f"D={delay}, seed={seed}, GPU={gpu} failed "
                                f"(exit {process.returncode}); see {log_path}")
@@ -236,9 +245,11 @@ def main():
         # Only the parent coordinator writes shared tables, regardless of finish order.
         rows.sort(key=lambda row: (row["delay"], seeds.index(row["seed"])))
         write_csv(output / "per_seed.csv", rows)
-        print(f"Completed {len(rows)}/12: D={result['delay']}, seed={result['seed']}", flush=True)
+        progress.finish(result)
 
-    run_jobs([(delay, seed) for delay in DELAYS for seed in seeds], gpus, launch, save_result)
+    jobs = [(delay, seed) for delay in DELAYS for seed in seeds]
+    with ProgressDisplay(gpus, len(jobs)) as progress:
+        run_jobs(jobs, gpus, launch, save_result)
     summarize(rows, output)
 
 
