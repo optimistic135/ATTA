@@ -9,7 +9,25 @@
 ```bash
 python -m experiments.delayed_feedback.run \
   --dataset-root /path/to/datasets \
-  --gpu-idx 0
+  --gpus 0 1
+```
+
+双卡时每张卡同时运行一个独立实验，空闲卡自动领取下一个任务。
+不是把一个模型拆到两张卡上；总任务数仍为 12，共用同一组三个 seed。
+单卡用法保持兼容，将 `--gpus 0 1` 改为 `--gpu-idx 0`；不传设备参数也默认单卡 0。
+两个参数互斥，GPU 编号不得重复或为负数。
+
+GPU 编号是当前进程可见设备的逻辑编号。例如设置 `CUDA_VISIBLE_DEVICES=2,3` 后，
+仍传 `--gpus 0 1`，对应物理卡 2 和 3。显式使用 `--gpus` 时若 CUDA 不可用，
+或某个编号超出可见范围，任务会报错，不会悄悄改用 CPU。
+
+服务器后台运行：
+
+```bash
+nohup python -u -m experiments.delayed_feedback.run \
+  --dataset-root /path/to/datasets \
+  --gpus 0 1 \
+  > delayed_feedback.log 2>&1 &
 ```
 
 `--dataset-root` 下必须已有 `PACS/art_painting`、`PACS/cartoon`、
@@ -28,8 +46,9 @@ storage/checkpoints/round1/PACS/[2, 0, 1, 3]/ResNet18_3l_meanpool_0dp_Truefzbn/0
 原模型构造仍使用 torchvision 的 ImageNet 预训练初始化；离线运行时需预先准备其权重缓存。
 
 首次运行随机抽取三个不重复的 seed，保存到 `manifest.json`，对 D=0、10、20、30
-逐一复用，共 12 次运行。每次使用独立子进程，失败即停止，不把未完成的结果当成完整均值。
-默认 `--num-workers 0`，可按实验机器资源调整。
+逐一复用，共 12 次运行。每次使用独立子进程；某次失败后停止分派新任务，
+允许其他已启动任务结束并保存成功结果，不把未完成的结果当成完整均值。
+默认 `--num-workers 0`，该值是每个实验进程的数据加载子进程数，可按实验机器资源调整。
 
 复现实验可显式指定记录下来的三个 seed，并使用新的输出目录：
 
@@ -38,7 +57,7 @@ python -m experiments.delayed_feedback.run \
   --dataset-root /path/to/datasets \
   --seeds 123 456 789 \
   --output-dir /path/to/new-results \
-  --gpu-idx 0
+  --gpus 0 1
 ```
 
 默认输出目录为 `storage/delayed_feedback/<UTC时间>/`。
@@ -79,10 +98,10 @@ python -m experiments.delayed_feedback.run \
 
 输出包括：
 
-- `manifest.json`：三个 seed、D 列表、Git 提交、checkpoint SHA256 与路径。
+- `manifest.json`：三个 seed、D 列表、GPU 列表及可见设备配置、Git 提交、checkpoint SHA256 与路径。
 - `per_seed.csv`：12 次运行的独立结果，随每次成功运行增量保存。
 - `summary.csv`、`summary.md`：四个 D 的均值与标准差，仅完整运行后生成。
-- `D*/seed_*/settings.json`：该次参数和运行环境。
+- `D*/seed_*/settings.json`：该次参数、实际 GPU 编号和运行环境。
 - `D*/seed_*/result.json`：该次汇总结果。
 - `D*/seed_*/domains.csv`：各域实际样本数、batch 数、准确率，及按**查询来源域**归属的全流结束时反馈计数。
 - `D*/seed_*/batches.csv`：逐批预测与反馈状态，反馈计数为截至当前步的全局累计。
@@ -91,10 +110,10 @@ python -m experiments.delayed_feedback.run \
 
 ## 可选验证
 
-以下检查只测试时钟、跨域计数与均值汇总，不加载 PACS 或模型；由使用者在实验机器运行：
+以下检查覆盖时钟、跨域计数、均值汇总与多卡调度，不加载 PACS 或模型；由使用者在实验机器运行：
 
 ```bash
-python -m unittest experiments.delayed_feedback.test_protocol experiments.delayed_feedback.test_summary
+python -m unittest experiments.delayed_feedback.test_protocol experiments.delayed_feedback.test_summary experiments.delayed_feedback.test_scheduler
 ```
 
 本次代码交付按要求没有在本地运行实验或测试；没有预填任何实测准确率。

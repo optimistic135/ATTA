@@ -9,12 +9,15 @@ import csv
 import hashlib
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import random
 import statistics
 import subprocess
 import sys
 from datetime import datetime, timezone
+
+from .scheduler import run_jobs
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,11 +40,16 @@ def parser():
                      help="New directory; existing directories are never overwritten")
     cli.add_argument("--seeds", type=int, nargs=3,
                      help="Optional three distinct seeds to reproduce a previous sweep")
-    cli.add_argument("--gpu-idx", type=int, default=0)
+    devices = cli.add_mutually_exclusive_group()
+    devices.add_argument("--gpu-idx", type=int, default=None,
+                         help="Single GPU index (default: 0)")
+    devices.add_argument("--gpus", type=int, nargs="+",
+                         help="Run one independent experiment per GPU, e.g. --gpus 0 1")
     cli.add_argument("--num-workers", type=int, default=0)
     cli.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     cli.add_argument("--delay", type=int, choices=DELAYS, help=argparse.SUPPRESS)
     cli.add_argument("--seed", type=int, help=argparse.SUPPRESS)
+    cli.add_argument("--require-cuda", action="store_true", help=argparse.SUPPRESS)
     return cli
 
 
@@ -86,6 +94,14 @@ def run_worker(args):
 
     if args.seed is None or args.delay is None or args.output_dir is None:
         raise ValueError("Internal worker requires seed, delay and output-dir")
+    if args.gpu_idx is None or args.gpu_idx < 0 or args.gpus is not None:
+        raise ValueError("Internal worker requires one nonnegative --gpu-idx")
+    if torch.cuda.is_available():
+        if args.gpu_idx >= torch.cuda.device_count():
+            raise ValueError(f"GPU {args.gpu_idx} is not visible to this process")
+        torch.cuda.set_device(args.gpu_idx)
+    elif args.require_cuda:
+        raise RuntimeError("--gpus requires CUDA; no CUDA GPU is available")
     validate_inputs(args)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     config = config_summoner(args_parser([
@@ -105,7 +121,8 @@ def run_worker(args):
     dump_json(args.output_dir / "settings.json", {
         "seed": args.seed, "delay": args.delay, "batch_size": 100,
         "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
-        "device": str(config.device), "torch_version": torch.__version__,
+        "device": str(config.device), "gpu_idx": args.gpu_idx,
+        "torch_version": torch.__version__,
         "simatta": dict(config.atta.SimATTA), "num_workers": config.num_workers,
         "source": "Photo", "target_order": ["Art", "Cartoon", "Sketch"],
     })
@@ -168,6 +185,9 @@ def main():
         run_worker(args)
         return
     validate_inputs(args)
+    gpus = args.gpus if args.gpus is not None else [args.gpu_idx if args.gpu_idx is not None else 0]
+    if len(set(gpus)) != len(gpus) or any(gpu < 0 for gpu in gpus):
+        raise ValueError("Provide distinct nonnegative GPU indices")
     seeds = args.seeds if args.seeds is not None else random.SystemRandom().sample(range(1, 2**31), 3)
     if len(set(seeds)) != 3 or any(not 0 <= seed < 2**32 for seed in seeds):
         raise ValueError("Provide three distinct seeds in [0, 2**32)")
@@ -182,25 +202,43 @@ def main():
         "checkpoint_sha256": {name: sha256(args.checkpoint_dir / name)
                               for name in ("encoder_2.pth", "fc_2.pth")},
         "python": sys.version, "batch_size": 100,
+        "gpus": gpus, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "source": "Photo", "target_order": ["Art", "Cartoon", "Sketch"],
     })
-    print(f"Seeds: {seeds}\nResults: {output}", flush=True)
+    print(f"Seeds: {seeds}\nGPUs: {gpus}\nResults: {output}", flush=True)
     rows = []
-    for delay in DELAYS:
-        for seed in seeds:
-            run_dir = output / f"D{delay}" / f"seed_{seed}"
-            command = [sys.executable, "-m", "experiments.delayed_feedback.run", "--worker",
-                       "--delay", str(delay), "--seed", str(seed),
-                       "--dataset-root", str(args.dataset_root),
-                       "--checkpoint-dir", str(args.checkpoint_dir),
-                       "--output-dir", str(run_dir), "--gpu-idx", str(args.gpu_idx),
-                       "--num-workers", str(args.num_workers)]
-            print(f"Starting D={delay}, seed={seed}", flush=True)
-            with (output / f"D{delay}_seed_{seed}.log").open("w", encoding="utf-8") as log:
-                subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=True)
-            rows.append(json.loads((run_dir / "result.json").read_text(encoding="utf-8")))
-            # Preserve all completed runs even if a later worker fails.
-            write_csv(output / "per_seed.csv", rows)
+
+    def launch(job, gpu):
+        delay, seed = job
+        run_dir = output / f"D{delay}" / f"seed_{seed}"
+        command = [sys.executable, "-m", "experiments.delayed_feedback.run", "--worker",
+                   "--delay", str(delay), "--seed", str(seed),
+                   "--dataset-root", str(args.dataset_root),
+                   "--checkpoint-dir", str(args.checkpoint_dir),
+                   "--output-dir", str(run_dir), "--gpu-idx", str(gpu),
+                   "--num-workers", str(args.num_workers)]
+        if args.gpus is not None:
+            command.append("--require-cuda")
+        print(f"Starting D={delay}, seed={seed}, GPU={gpu}", flush=True)
+        log_path = output / f"D{delay}_seed_{seed}.log"
+        with log_path.open("w", encoding="utf-8") as log:
+            process = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+        if process.returncode:
+            raise RuntimeError(f"D={delay}, seed={seed}, GPU={gpu} failed "
+                               f"(exit {process.returncode}); see {log_path}")
+        result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+        if result["delay"] != delay or result["seed"] != seed:
+            raise ValueError(f"Worker result identity mismatch: {run_dir}")
+        return result
+
+    def save_result(result):
+        rows.append(result)
+        # Only the parent coordinator writes shared tables, regardless of finish order.
+        rows.sort(key=lambda row: (row["delay"], seeds.index(row["seed"])))
+        write_csv(output / "per_seed.csv", rows)
+        print(f"Completed {len(rows)}/12: D={result['delay']}, seed={result['seed']}", flush=True)
+
+    run_jobs([(delay, seed) for delay in DELAYS for seed in seeds], gpus, launch, save_result)
     summarize(rows, output)
 
 
