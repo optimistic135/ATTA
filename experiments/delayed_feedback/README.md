@@ -95,6 +95,9 @@ python -m experiments.delayed_feedback.run \
 - 标签未返回时跳过依赖真值的 `cluster_train`；已有真值后每批继续原来的记忆重放。
   不额外发明无监督训练损失。待返回样本也会刷新特征，刷新不需要标签。
 - 聚类候选数不足时，将簇数截断至候选数；空候选池不查询。这是对极小/空候选池的防错保护。
+- 多个聚类中心可能选中同一张图片。查询样本进入记忆库前按 stream ID 稳定去重，
+  合并其聚类权重，同一图片只计一次查询、一次返回；不同图片即使类别相同也不会被合并。
+  低熵伪标签记忆保持原行为。oracle 仍拒绝重复查询，不靠忽略异常跳过计费。
 
 ## 输出表
 
@@ -131,5 +134,15 @@ python -m experiments.delayed_feedback.run \
 ```bash
 python -m unittest experiments.delayed_feedback.test_protocol experiments.delayed_feedback.test_summary experiments.delayed_feedback.test_scheduler
 ```
+
+复核“多个聚类中心选中同一图片”这一回归问题，可在安装好原项目依赖的服务器上执行：
+
+```bash
+python -m unittest experiments.delayed_feedback.test_selection
+```
+
+该检查强制两个聚类中心指向同一候选图，经过实际的原始 `sample_select` 与实验适配层，
+验证查询只登记一次、权重守恒、四个 D 的标签释放正确，并且不会按类别误合并训练样本。
+不加载数据、checkpoint 或 CUDA 模型。
 
 本次代码交付按要求没有在本地运行实验或测试；没有预填任何实测准确率。

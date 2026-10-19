@@ -75,6 +75,7 @@ storage/checkpoints/round1/VLCS/[0, 1, 2, 3]/ResNet18_3l_meanpool_0dp_Truefzbn/0
 
 与 PACS 一样，保留官方聚类查询数量机制；`budgets: 100` 不构成原循环中的硬预算限制。
 模型和等待队列跨域连续保留；只有已返回真值参与监督训练；准确率来自每批更新前的首次预测。
+复用 PACS 的查询 ID 去重保护：多个聚类中心指向同一图片时只查询一次，并合并聚类权重。
 
 若要与某次 PACS 运行使用相同的 seed，可读取其 `manifest.json`，再显式指定：
 
