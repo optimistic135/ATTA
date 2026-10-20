@@ -73,6 +73,9 @@ python -u -m experiments.utility_prediction.run \
 | delay/query_step/return_step | 查询延迟及全局查询、返回批次 |
 | query_domain/return_domain | 查询、返回所在域 |
 | query_entropy/return_entropy | 同一图像查询与返回时的预测熵 |
+| return_true_probability | 返回时、更新前，模型赋予已返回真实类别的概率 |
+| need | 连续纠错需求：1 - return_true_probability，范围为[0,1] |
+| need_binary | 旧二值纠错指标：返回时预测类别是否与真值不同，保留供对照 |
 | prediction_changed/prediction_js | 预测类别变化、预测分布的JS散度 |
 | feature_temporal_cosine | 同一图像查询与返回时特征的余弦相似度 |
 | feature_batch_cosine | 历史图像当前特征与返回批特征均值的余弦相似度 |
@@ -117,6 +120,70 @@ python -u -m experiments.utility_prediction.run \
 python -m experiments.utility_prediction.analyze \
   --output-dir storage/utility_prediction/pacs_seed110
 ```
+
+## 连续纠错需求 Need 与六项特征导出
+
+现在采用 `need = 1 - p(y_i | x_i; theta_return)`：概率来自标签返回后、
+本步任何监督更新之前的模型，类别 `y_i` 是已经返回的真实标签。
+它不是 `1 - max(p)`，也不是预测熵；预测正确但置信度低的样本仍可能有较大的 need。
+该特征依赖已经返回的标签，用于返回后是否采用监督的研究，不声称标签返回前可用。
+
+新实验会在 `return_features.csv` 和 `utilities.csv` 保存该概率及连续 need，
+完成后自动导出 `utility_features_continuous.csv`。其六项核心字段为：
+
+| 字段 | 定义 |
+|---|---|
+| utility | 完整未来窗口的 USE - SKIP 准确率差，保持0--1尺度；乘100为百分点 |
+| delay | 延迟的batch数 |
+| need | 1 - 返回时真实类别概率 |
+| pred_drift | prediction_js |
+| grad_cos | gradient_reference_cosine，分类头真值梯度与当前批teacher伪标签梯度的余弦相似度 |
+| feature_similarity | feature_batch_cosine |
+
+导出文件还保留 `sample_id`、`return_step`、`return_true_probability` 和 `need_binary`，
+只统计完整窗口且 utility 非空的事件。不会改变原有预测分析器的特征列表或覆盖原来的二值导出文件。
+
+### 已完成实验如何补算
+
+旧 CSV 没有保存真实类别概率，不能仅由 argmax、熵或最终模型准确恢复。
+正常完成实验的返回时快照也已按原流程删除，因此需要重放事实轨迹。
+以下命令只重放每个 D 的真实适应过程，**不重新运行 USE/SKIP 分支**，不改变现有 utility：
+
+```bash
+python -m experiments.utility_prediction.backfill_need \
+  --output-dir storage/utility_prediction/pacs_seed110 \
+  --gpu-idx 0
+```
+
+默认从原 `manifest.json` 读取 seed、数据与checkpoint路径，从各D的 `settings.json`
+读取 batch size、训练步数、评估窗口和 SimATTA 参数。若目录位置变了，可额外传
+`--dataset-root /new/datasets` 和 `--checkpoint-dir /new/weights`。
+源权重 SHA256 必须与原实验一致。
+
+补算不会保存模型快照，也不会调用反事实收益评估。完成所有D前，必须逐事件对齐
+sample ID、查询/返回步、标签、预测类别、原熵、预测漂移、特征和梯度相似度；
+数值使用 `rtol=1e-5, atol=1e-7`。若不匹配就报错，不能把新轨迹的 need 与旧 utility 混用。
+请尽量使用原数据和原依赖环境。检查通过后另存 `need_backfill.csv`，原结果文件保持不变。
+
+随后导出：
+
+```bash
+python -m experiments.utility_prediction.export_features \
+  --output-dir storage/utility_prediction/pacs_seed110
+```
+
+导出器会读取新实验已记录的概率，或自动按 `(delay, sample_id, return_step)`
+一对一关联 `need_backfill.csv`。输出为 `utility_features_continuous.csv`。
+已有同名文件会报错；可用 `--output-file /path/to/new.csv` 指定其他新文件。
+补算侧文件也支持 `--output-file`；自定义侧文件通过导出器的 `--need-features /path/to/sidecar.csv` 传入。
+
+可在服务器验证导出与轨迹对齐逻辑（不运行模型实验）：
+
+```bash
+python -m unittest experiments.utility_prediction.test_need
+```
+
+本次改进按要求未在本地运行实验或测试；补算是否与原轨迹对齐以服务器实际检查为准。
 
 每个标签都需要两条20批更新分支，耗时显著大于普通SimATTA，不能承诺更快。
 按返回批保存模型而非每标签保存；CPU内存复用选样缓存，未来输入只缓存20批，
