@@ -48,12 +48,14 @@ class UtilitySimATTA(DelayedSimATTA):
     paired branches. Each event is one distinct returned image/label.
     """
 
-    def __init__(self, config, delay, output_dir, steps=30, horizon=20):
+    def __init__(self, config, delay, output_dir, steps=30, horizon=20,
+                 save_snapshots=True):
         super().__init__(config, delay)
         self.output_dir = Path(output_dir)
         self.snapshot_dir = self.output_dir / "snapshots"
         self.snapshot_dir.mkdir()
         self.steps, self.horizon = steps, horizon
+        self.save_snapshots = save_snapshots
         self.history, self.events = [], []
         self.query_info, self.seen_returns = {}, set()
         # FastDataLoader's sequential subset is the actual per-domain stream.
@@ -120,6 +122,11 @@ class UtilitySimATTA(DelayedSimATTA):
                     "returned_label": self.received[index],
                     "query_prediction": int(old.argmax()),
                     "return_prediction": int(p.argmax()),
+                    # p is measured after label arrival, before this step's update.
+                    # Use the returned TRUE class, not the predicted class/confidence.
+                    "return_true_probability": float(p[self.received[index]]),
+                    "need": 1.0 - float(p[self.received[index]]),
+                    "need_binary": int(int(p.argmax()) != self.received[index]),
                     "query_domain": self.experiment.domains[self.stream[info["query_step"]][0]],
                     "return_domain": self.experiment.domains[self.stream[row["step"]][0]],
                     "query_entropy": float(-(old * old.clamp_min(1e-12).log()).sum()),
@@ -131,8 +138,9 @@ class UtilitySimATTA(DelayedSimATTA):
                     "gradient_temporal_cosine": cosine(old_grad, current_pseudo_grad),
                     "gradient_reference_cosine": cosine(grad, reference_grad),
                 })
-            torch.save({key: value.detach().cpu() for key, value in self.model.state_dict().items()},
-                       self.snapshot_dir / f"step_{row['step']}.pt")
+            if self.save_snapshots:
+                torch.save({key: value.detach().cpu() for key, value in self.model.state_dict().items()},
+                           self.snapshot_dir / f"step_{row['step']}.pt")
         self.seen_returns.update(returned)
         saved_rng = rng_state()
         try:
