@@ -11,66 +11,23 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.nn import functional as F
-from torch.utils.data import TensorDataset
 
-from ATTA.data.loaders.fast_data_loader import InfiniteDataLoader
 from experiments.delayed_feedback.simatta import DelayedSimATTA, write_csv
 
 
 DEFAULTS = {
     "pending_penalty": 0.25,
+    "replay_mix": 0.25,
+    "replay_neighbors": 4,
     "epsilon": 1e-12,
     "teacher_cache_size": 512,
+    "gate_neighbors": 8,
+    "gate_similarity": 0.8,
+    "gate_temperature": 0.1,
+    "gate_prior": 4.0,
     "reference": "SimATTA low-entropy frozen-teacher pseudo-label memory",
+    "memory": "all returned labels; resampled on every gradient update",
 }
-
-
-@torch.no_grad()
-def project_supervision(supervised, reference, epsilon=1e-12):
-    """Project a gradient onto the reference's non-conflicting half-space.
-
-    None denotes an unused parameter, i.e. a zero vector. The guarantee concerns
-    the loss gradients before SGD momentum, not the momentum-adjusted update.
-    """
-    device = next(g.device for g in supervised if g is not None)
-    dot = torch.zeros((), device=device)
-    reference_norm = torch.zeros_like(dot)
-    supervised_norm = torch.zeros_like(dot)
-    for target, source in zip(supervised, reference):
-        if target is not None:
-            supervised_norm += target.float().square().sum()
-        if source is not None:
-            reference_norm += source.float().square().sum()
-        if target is not None and source is not None:
-            dot += (target.float() * source.float()).sum()
-    if not bool(torch.isfinite(dot) & torch.isfinite(reference_norm)
-                & torch.isfinite(supervised_norm)):
-        raise FloatingPointError("FCRA encountered a non-finite loss gradient")
-    valid = bool(reference_norm > epsilon)
-    conflict = valid and bool(dot < 0)
-    corrected = list(supervised)
-    if conflict:
-        coefficient = dot / reference_norm
-        corrected = [
-            target if source is None else (
-                -coefficient * source if target is None else target - coefficient * source
-            )
-            for target, source in zip(supervised, reference)
-        ]
-    dot_after = sum(
-        (target.float() * source.float()).sum()
-        for target, source in zip(corrected, reference)
-        if target is not None and source is not None
-    )
-    cosine = (float(dot / (reference_norm * supervised_norm).sqrt())
-              if valid and bool(supervised_norm > epsilon) else None)
-    return corrected, {
-        "reference_valid": valid, "conflict": conflict,
-        "gradient_cosine": cosine, "dot_before": float(dot),
-        "dot_after": float(dot_after),
-        "reference_norm_sq": float(reference_norm),
-        "supervised_norm_sq": float(supervised_norm),
-    }
 
 
 class FCRA(DelayedSimATTA):
@@ -79,7 +36,7 @@ class FCRA(DelayedSimATTA):
     def __init__(self, config, delay):
         super().__init__(config, delay)
         self.stream_step = -1
-        self.query_rows, self.retrieval_rows, self.update_rows = [], [], []
+        self.query_rows, self.replay_rows, self.update_rows = [], [], []
         # Fixed-teacher predictions are stored when a sample is queried. The
         # calibration cache contains only events whose true label has returned.
         self.teacher_predictions = {}
@@ -164,121 +121,144 @@ class FCRA(DelayedSimATTA):
                 "return_domain": record.return_domain,
             })
 
-    @torch.no_grad()
-    def retrieve(self):
-        """Score every returned label at the current, pre-update model state."""
+    def _supervised_memory(self):
+        """Build the complete, never-pruned memory of released labels."""
         indices = sorted(self.received)
-        if not indices:
-            return None
+        data = self.query_anchors.data[indices].cpu()
+        labels = torch.tensor([self.received[i] for i in indices], dtype=torch.long)
+        return indices, data, labels
+
+    @torch.no_grad()
+    def _replay_statistics(self, data, labels):
+        """Score every returned sample at the current, pre-update model state."""
         self.model.eval()
-        batch_features = self.model[0](self.current_data)
-        reference_feature = F.normalize(batch_features.mean(0, keepdim=True), dim=1)
-        needs, relevances = [], []
+        needs, features = [], []
         size = self.config.atta.batch_size
-        for start in range(0, len(indices), size):
-            ids = indices[start:start + size]
-            images = self.query_anchors.data[ids].to(self.config.device)
-            features = self.model[0](images)
-            probabilities = self.model[1](features).softmax(1)
-            labels = torch.tensor([self.received[i] for i in ids],
-                                  device=probabilities.device, dtype=torch.long)
-            need = 1 - probabilities.gather(1, labels[:, None]).squeeze(1)
-            similarity = (F.normalize(features, dim=1) * reference_feature).sum(1)
+        for start in range(0, len(data), size):
+            images = data[start:start + size].to(self.config.device)
+            targets = labels[start:start + size].to(self.config.device)
+            encoded = self.model[0](images)
+            probabilities = self.model[1](encoded).softmax(1)
+            need = 1 - probabilities.gather(1, targets[:, None]).squeeze(1)
             needs.append(need.cpu())
-            relevances.append(((1 + similarity) / 2).clamp(0, 1).cpu())
-        need, relevance = torch.cat(needs), torch.cat(relevances)
+            features.append(F.normalize(encoded, dim=1).cpu())
+        need = torch.cat(needs)
+        memory_features = torch.cat(features)
+        # Relevance uses a local neighbourhood of the current batch instead of
+        # one batch centre, so different current classes stay distinguishable.
+        current_features = F.normalize(self.model[0](self.current_data), dim=1).cpu()
+        affinity = ((1 + memory_features @ current_features.T) / 2).clamp(0, 1)
+        neighbours = min(DEFAULTS["replay_neighbors"], current_features.shape[0])
+        relevance = affinity.topk(neighbours, dim=1).values.mean(1)
         score = need * relevance
-        # Stable tie-breaking uses immutable anchor IDs, never labels/domains.
-        positions = sorted(range(len(indices)), key=lambda j: (-float(score[j]), indices[j]))
-        positions = positions[:self.config.train.train_bs]
-        selected = [indices[j] for j in positions]
-        weights = score[positions]
-        weights = (weights / weights.mean() if bool(weights.mean() > DEFAULTS["epsilon"])
-                   else torch.ones_like(weights))
-        for position, index, weight in zip(positions, selected, weights):
-            record = self.oracle.records[index]
-            self.retrieval_rows.append({
-                "step": self.stream_step, "anchor_index": index,
-                "sample_id": int(self.query_anchors.target[index]),
-                "label": self.received[index], "query_step": record.query_step,
-                "return_step": record.return_step, "query_domain": record.query_domain,
-                "return_domain": record.return_domain,
-                "need": float(need[position]), "relevance": float(relevance[position]),
-                "score": float(score[position]), "weight": float(weight),
-            })
-        return TensorDataset(
-            self.query_anchors.data[selected],
-            torch.tensor([self.received[i] for i in selected], dtype=torch.long),
-            weights,
-        )
+        if not bool(torch.isfinite(score).all()):
+            raise FloatingPointError("FCRA encountered a non-finite replay score")
+        count = len(score)
+        uniform = torch.full((count,), 1.0 / count)
+        epsilon = DEFAULTS["epsilon"]
+        if float(score.sum()) <= epsilon:
+            probabilities = uniform
+        else:
+            probabilities = (
+                (1 - DEFAULTS["replay_mix"]) * uniform
+                + DEFAULTS["replay_mix"] * (score + epsilon) / (score + epsilon).sum()
+            )
+        return need, relevance, score, probabilities
+
+    @torch.no_grad()
+    def _feedback_gates(self, features, labels):
+        """Local reliability of teacher pseudo labels from returned truth.
+
+        features must be normalized teacher features. Events are checked for
+        the same teacher class and cosine similarity >= 0.8; at most the eight
+        most similar eligible events contribute, weighted by exp((cos-1)/tau).
+        """
+        count = len(self.calibration_events)
+        if count == 0:
+            return torch.ones(len(features), dtype=features.dtype, device=features.device)
+        events = list(self.calibration_events)
+        cache_features = torch.stack([event[1] for event in events]).to(features.device)
+        cache_predictions = torch.tensor(
+            [event[0] for event in events], dtype=torch.long, device=features.device)
+        cache_correct = torch.tensor(
+            [event[2] for event in events], dtype=features.dtype, device=features.device)
+        similarity = features @ cache_features.T
+        eligible = ((cache_predictions.unsqueeze(0) == labels.unsqueeze(1))
+                    & (similarity >= DEFAULTS["gate_similarity"]))
+        masked = similarity.masked_fill(~eligible, -1.0)
+        neighbours = min(DEFAULTS["gate_neighbors"], count)
+        values, positions = masked.topk(neighbours, dim=1)
+        valid = values >= DEFAULTS["gate_similarity"]
+        weights = (torch.exp((values - 1) / DEFAULTS["gate_temperature"]) * valid)
+        evidence = (weights * cache_correct[positions]).sum(1)
+        denominator = weights.sum(1)
+        gates = ((DEFAULTS["gate_prior"] + evidence)
+                 / (DEFAULTS["gate_prior"] + denominator))
+        return torch.where(valid.any(1), gates, torch.ones_like(gates))
 
     @torch.enable_grad()
     def cluster_train(self, target_anchors, source_anchors):
         # Calibration events must exist before the student consumes the labels.
         self._record_calibration_events()
-        target_dataset = self.retrieve()
-        if target_dataset is None:
+        indices, memory_data, memory_labels = self._supervised_memory()
+        if not indices:
             return
+        need, relevance, score, probabilities = self._replay_statistics(
+            memory_data, memory_labels)
         reference = self.source_anchors
-        has_reference = reference is not None and reference.num_elem() > 0
-        source_count = reference.num_elem() if has_reference else target_anchors.num_elem()
-        alpha = target_anchors.num_elem() / (target_anchors.num_elem() + source_count)
-        if source_count < self.cold_start:
+        has_pseudo = reference is not None and reference.num_elem() > 0
+        pseudo_count = reference.num_elem() if has_pseudo else 0
+        returned = len(indices)
+        alpha = returned / (returned + pseudo_count) if has_pseudo else 1.0
+        if has_pseudo and pseudo_count < self.cold_start:
             alpha = min(0.2, alpha)
-        target_loader = iter(InfiniteDataLoader(
-            target_dataset, weights=None, batch_size=self.config.train.train_bs,
-            num_workers=self.config.num_workers))
-        source_loader = (iter(InfiniteDataLoader(
-            TensorDataset(reference.data, reference.target), weights=None,
-            batch_size=self.config.train.train_bs, num_workers=self.config.num_workers))
-            if has_reference else None)
+        batch_size = self.config.train.train_bs
         self.model.train()
-        parameters = [p for p in self.model.parameters() if p.requires_grad]
         optimizer = torch.optim.SGD(self.model.parameters(),
                                     lr=self.config.atta.SimATTA.lr, momentum=0.9)
+        draws = torch.zeros(returned)
         loss_window, tolerance, lowest_loss = [], 0, float("inf")
         iteration = 0
         while True:
-            images, labels, weights = next(target_loader)
-            images, labels = images.to(self.config.device), labels.to(self.config.device)
-            weights = weights.to(self.config.device)
+            sampled = torch.multinomial(probabilities, batch_size, replacement=True)
+            images = memory_data[sampled].to(self.config.device)
+            labels = memory_labels[sampled].to(self.config.device)
+            draws.index_add_(0, sampled, torch.ones(len(sampled)))
             losses = F.cross_entropy(self.model(images), labels, reduction="none")
-            supervised_loss = (weights * losses).mean()
-            optimizer.zero_grad(set_to_none=True)
-            supervised = torch.autograd.grad(supervised_loss, parameters, allow_unused=True)
-            reference_loss = None
-            if has_reference:
-                source_images, source_labels = next(source_loader)
-                reference_loss = self.config.metric.loss_func(
-                    self.model(source_images.to(self.config.device)),
-                    source_labels.to(self.config.device))
-                reference_grad = torch.autograd.grad(reference_loss, parameters, allow_unused=True)
+            supervised_loss = losses.mean()
+            pseudo_loss, gates = None, None
+            if has_pseudo:
+                pseudo_indices = torch.randint(0, pseudo_count, (batch_size,))
+                pseudo_images = reference.data[pseudo_indices].to(self.config.device)
+                pseudo_labels = reference.target[pseudo_indices].to(
+                    self.config.device).long()
+                teacher_features = F.normalize(
+                    reference.feats[pseudo_indices].to(self.config.device), dim=1)
+                gates = self._feedback_gates(teacher_features, pseudo_labels)
+                pseudo_losses = F.cross_entropy(
+                    self.model(pseudo_images), pseudo_labels, reduction="none")
+                # Fixed denominator: weak gates lower the absolute contribution
+                # instead of renormalizing the pseudo-label batch.
+                pseudo_loss = (gates * pseudo_losses).mean()
+                loss = alpha * supervised_loss + (1 - alpha) * pseudo_loss
             else:
-                reference_grad = [None] * len(parameters)
-            corrected, diagnostic = project_supervision(
-                supervised, reference_grad, DEFAULTS["epsilon"])
-            for parameter, target, source in zip(parameters, corrected, reference_grad):
-                if has_reference:
-                    gradient = (alpha * target if target is not None else None)
-                    if source is not None:
-                        term = (1 - alpha) * source
-                        gradient = term if gradient is None else gradient + term
-                else:
-                    # SimATTA's source fallback duplicates truth replay. Use the
-                    # calibrated truth loss once, with no artificial reference.
-                    gradient = target
-                parameter.grad = gradient
+                # SimATTA's empty pseudo memory falls back to truth replay.
+                loss = supervised_loss
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
             optimizer.step()
             self.update_rows.append({
                 "step": self.stream_step, "iteration": iteration,
-                "returned_memory": len(self.received), "retrieved": len(target_dataset),
-                "source_memory": reference.num_elem() if has_reference else 0,
-                "alpha": alpha, "has_reference": has_reference,
+                "returned_memory": returned, "replay_batch": int(len(sampled)),
+                "source_memory": pseudo_count, "alpha": alpha,
+                "has_pseudo": has_pseudo,
                 "supervised_loss": float(supervised_loss.detach()),
-                "reference_loss": float(reference_loss.detach()) if has_reference else None,
-                "first_order_improvement": (self.config.atta.SimATTA.lr * diagnostic["dot_before"]
-                                            if diagnostic["reference_valid"] else None),
-                **diagnostic,
+                "pseudo_loss": float(pseudo_loss.detach()) if has_pseudo else None,
+                "gate_mean": float(gates.mean()) if has_pseudo else None,
+                "gate_min": float(gates.min()) if has_pseudo else None,
+                "gate_max": float(gates.max()) if has_pseudo else None,
+                "drawn_probability_mean": float(probabilities[sampled].mean()),
+                "calibration_cache": len(self.calibration_events),
             })
             # Exact PACS SimATTA stopping structure. Its steps=30 is NOT a
             # fixed-update cap on PACS; the utility experiment uses another loop.
@@ -294,6 +274,20 @@ class FCRA(DelayedSimATTA):
                     break
                 loss_window = []
             iteration += 1
+        distinct = int((draws > 0).sum())
+        self.replay_rows.append({
+            "step": self.stream_step, "returned_memory": returned,
+            "updates": iteration, "source_memory": pseudo_count,
+            "need_mean": float(need.mean()), "need_max": float(need.max()),
+            "relevance_mean": float(relevance.mean()),
+            "score_mean": float(score.mean()), "score_max": float(score.max()),
+            "probability_min": float(probabilities.min()),
+            "probability_max": float(probabilities.max()),
+            "effective_sample_size": float(1 / probabilities.square().sum()),
+            "distinct_sampled": distinct,
+            "coverage": distinct / returned,
+            "max_draws": int(draws.max()),
+        })
 
     def run_stream(self, output_dir, progress=None):
         result = super().run_stream(output_dir, progress=progress)
@@ -305,18 +299,20 @@ class FCRA(DelayedSimATTA):
             (output / "calibration.csv").write_text(
                 "step,anchor_index,sample_id,teacher_prediction,label,correct,cache_size,"
                 "query_step,return_step,query_domain,return_domain\n", encoding="utf-8")
-        if self.retrieval_rows:
-            write_csv(output / "retrieval.csv", self.retrieval_rows)
+        if self.replay_rows:
+            write_csv(output / "replay.csv", self.replay_rows)
         else:
-            (output / "retrieval.csv").write_text(
-                "step,anchor_index,sample_id,label,query_step,return_step,query_domain,"
-                "return_domain,need,relevance,score,weight\n", encoding="utf-8")
+            (output / "replay.csv").write_text(
+                "step,returned_memory,updates,source_memory,need_mean,need_max,"
+                "relevance_mean,score_mean,score_max,probability_min,probability_max,"
+                "effective_sample_size,distinct_sampled,coverage,max_draws\n",
+                encoding="utf-8")
         if self.update_rows:
             write_csv(output / "updates.csv", self.update_rows)
         else:
             (output / "updates.csv").write_text(
-                "step,iteration,returned_memory,retrieved,source_memory,alpha,has_reference,"
-                "supervised_loss,reference_loss,first_order_improvement,reference_valid,conflict,gradient_cosine,"
-                "dot_before,dot_after,reference_norm_sq,supervised_norm_sq\n", encoding="utf-8")
+                "step,iteration,returned_memory,replay_batch,source_memory,alpha,has_pseudo,"
+                "supervised_loss,pseudo_loss,gate_mean,gate_min,gate_max,"
+                "drawn_probability_mean,calibration_cache\n", encoding="utf-8")
         result["method"] = "FCRA"
         return result
