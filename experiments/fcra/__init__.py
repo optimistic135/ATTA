@@ -1,1 +1,1 @@
-"""Feedback-Calibrated Retrieval and Adaptation on the PACS delayed stream."""
+"""Feedback-Calibrated Replay and Adaptation on the PACS delayed stream."""

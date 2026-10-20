@@ -175,7 +175,8 @@ def main():
         "python": sys.version, "gpus": gpus, "num_workers": args.num_workers,
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "source": EXPERIMENT.source, "target_order": list(EXPERIMENT.targets),
-        "protocol": "predict before release/update; global batch clock; no final flush",
+        "protocol": "predict before release/update; complete returned-label memory; "
+                    "per-update replay sampling; no final flush",
     }
     dump_json(output / "manifest.json", manifest)
     print(f"Method: FCRA\nSeeds: {seeds}\nGPUs: {gpus}\nResults: {output}", flush=True)

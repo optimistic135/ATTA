@@ -31,7 +31,7 @@ DEFAULTS = {
 
 
 class FCRA(DelayedSimATTA):
-    """Preserve the delayed stream, with PCFR selection and FACA training."""
+    """Preserve the delayed stream, with PCFR selection and feedback-calibrated replay."""
 
     def __init__(self, config, delay):
         super().__init__(config, delay)
