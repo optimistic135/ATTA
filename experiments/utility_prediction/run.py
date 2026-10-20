@@ -92,6 +92,8 @@ def main():
             torch.cuda.empty_cache()
         from .analyze import analyze
         analyze(output)
+        from .export_features import export_features
+        export_features(output)
     except Exception:
         manifest["status"] = "failed"
         dump_json(output / "manifest.json", manifest)
