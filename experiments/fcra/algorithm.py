@@ -276,7 +276,7 @@ class FCRA(DelayedSimATTA):
         distinct = int((draws > 0).sum())
         self.replay_rows.append({
             "step": self.stream_step, "returned_memory": returned,
-            "updates": iteration, "source_memory": pseudo_count,
+            "updates": iteration + 1, "source_memory": pseudo_count,
             "need_mean": float(need.mean()), "need_max": float(need.max()),
             "relevance_mean": float(relevance.mean()),
             "score_mean": float(score.mean()), "score_max": float(score.max()),
