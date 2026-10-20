@@ -49,13 +49,14 @@ class UtilitySimATTA(DelayedSimATTA):
     """
 
     def __init__(self, config, delay, output_dir, steps=30, horizon=20,
-                 save_snapshots=True):
+                 save_snapshots=True, event_observer=None):
         super().__init__(config, delay)
         self.output_dir = Path(output_dir)
         self.snapshot_dir = self.output_dir / "snapshots"
         self.snapshot_dir.mkdir()
         self.steps, self.horizon = steps, horizon
         self.save_snapshots = save_snapshots
+        self.event_observer = event_observer
         self.history, self.events = [], []
         self.query_info, self.seen_returns = {}, set()
         # FastDataLoader's sequential subset is the actual per-domain stream.
@@ -91,6 +92,7 @@ class UtilitySimATTA(DelayedSimATTA):
         row["source_count"] = (self.source_anchors.num_elem()
                                if self.source_anchors is not None else 0)
         returned = sorted(set(self.received) - self.seen_returns)
+        event_start = len(self.events)
         if returned:
             self.model.eval()
             self.teacher.eval()
@@ -141,6 +143,8 @@ class UtilitySimATTA(DelayedSimATTA):
             if self.save_snapshots:
                 torch.save({key: value.detach().cpu() for key, value in self.model.state_dict().items()},
                            self.snapshot_dir / f"step_{row['step']}.pt")
+        if self.event_observer is not None:
+            self.event_observer(row["step"], self.events[event_start:])
         self.seen_returns.update(returned)
         saved_rng = rng_state()
         try:
