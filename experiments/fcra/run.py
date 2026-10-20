@@ -79,6 +79,7 @@ def run_worker(args):
         "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
         "fcra": DEFAULTS, "simatta": dict(config.atta.SimATTA),
         "gpu_clustering": config.atta.gpu_clustering,
+        "clustering": "GPU KMeans" if config.atta.gpu_clustering else "sklearn CPU KMeans",
         "num_workers": config.num_workers, "device": str(config.device),
         "gpu_idx": args.gpu_idx, "gpu_name": torch.cuda.get_device_name(args.gpu_idx),
         "torch_version": torch.__version__, "cuda_version": torch.version.cuda,

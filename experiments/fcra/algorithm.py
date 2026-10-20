@@ -43,6 +43,9 @@ def project_supervision(supervised, reference, epsilon=1e-12):
             reference_norm += source.float().square().sum()
         if target is not None and source is not None:
             dot += (target.float() * source.float()).sum()
+    if not bool(torch.isfinite(dot) & torch.isfinite(reference_norm)
+                & torch.isfinite(supervised_norm)):
+        raise FloatingPointError("FCRA encountered a non-finite loss gradient")
     valid = bool(reference_norm > epsilon)
     conflict = valid and bool(dot < 0)
     corrected = list(supervised)
