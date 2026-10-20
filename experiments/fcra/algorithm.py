@@ -52,12 +52,6 @@ class FCRA(DelayedSimATTA):
         self.model.eval()
         features = self.model[0](data)
         outputs = self.model[1](features)
-        # Keep the fixed teacher's prediction and normalized feature for every
-        # newly queried sample. They are joined with truth only after release.
-        self.teacher.eval()
-        teacher_raw = self.teacher[0](data)
-        teacher_features = F.normalize(teacher_raw, dim=1)
-        teacher_predictions = self.teacher[1](teacher_raw).argmax(1)
         entropy = self.softmax_entropy(outputs)
         scale = math.log(outputs.shape[1])
         threshold = self.config.atta.SimATTA.eh
@@ -82,12 +76,17 @@ class FCRA(DelayedSimATTA):
             # candidates not covered too strongly by outstanding requests.
             super().select_queries(data[keep], stream_ids[keep.cpu()])
         current = self.query_anchors.num_elem() if self.query_anchors is not None else 0
-        first_stream_id = int(stream_ids[0])
-        for index in range(previous, current):
-            sample_id = int(self.query_anchors.target[index])
-            local = sample_id - first_stream_id
-            self.teacher_predictions[index] = int(teacher_predictions[local])
-            self.teacher_features[index] = teacher_features[local].cpu()
+        if current > previous:
+            # Score only the samples newly admitted by the original selector.
+            # This is still before oracle release and before any update.
+            self.teacher.eval()
+            queried = self.query_anchors.data[previous:current].to(self.config.device)
+            teacher_raw = self.teacher[0](queried)
+            teacher_features = F.normalize(teacher_raw, dim=1)
+            teacher_predictions = self.teacher[1](teacher_raw).argmax(1)
+            for offset, index in enumerate(range(previous, current)):
+                self.teacher_predictions[index] = int(teacher_predictions[offset])
+                self.teacher_features[index] = teacher_features[offset].cpu()
         self.query_rows.append({
             "step": self.stream_step, "pending_before_release": len(pending),
             "eligible_before": int(eligible.sum()), "eligible_after": int(keep.sum()),
