@@ -1,9 +1,10 @@
-"""FCRA: pending coverage, current-error retrieval and conflict-aware replay.
+"""FCRA: pending coverage, complete-label replay and feedback calibration.
 
 Only the inherited oracle holds unreleased labels. This module receives images,
 stream IDs and, after release, the oracle's labeled memory.
 """
 
+from collections import deque
 import math
 from pathlib import Path
 
@@ -19,9 +20,8 @@ from experiments.delayed_feedback.simatta import DelayedSimATTA, write_csv
 DEFAULTS = {
     "pending_penalty": 0.25,
     "epsilon": 1e-12,
-    "retrieval_size": "train.train_bs",
+    "teacher_cache_size": 512,
     "reference": "SimATTA low-entropy frozen-teacher pseudo-label memory",
-    "projection": "weighted supervised minibatch; all trainable parameters",
 }
 
 
@@ -80,6 +80,13 @@ class FCRA(DelayedSimATTA):
         super().__init__(config, delay)
         self.stream_step = -1
         self.query_rows, self.retrieval_rows, self.update_rows = [], [], []
+        # Fixed-teacher predictions are stored when a sample is queried. The
+        # calibration cache contains only events whose true label has returned.
+        self.teacher_predictions = {}
+        self.teacher_features = {}
+        self.calibrated = set()
+        self.calibration_events = deque(maxlen=DEFAULTS["teacher_cache_size"])
+        self.calibration_rows = []
 
     @torch.no_grad()
     def select_queries(self, data, stream_ids):
@@ -88,6 +95,12 @@ class FCRA(DelayedSimATTA):
         self.model.eval()
         features = self.model[0](data)
         outputs = self.model[1](features)
+        # Keep the fixed teacher's prediction and normalized feature for every
+        # newly queried sample. They are joined with truth only after release.
+        self.teacher.eval()
+        teacher_raw = self.teacher[0](data)
+        teacher_features = F.normalize(teacher_raw, dim=1)
+        teacher_predictions = self.teacher[1](teacher_raw).argmax(1)
         entropy = self.softmax_entropy(outputs)
         scale = math.log(outputs.shape[1])
         threshold = self.config.atta.SimATTA.eh
@@ -112,6 +125,12 @@ class FCRA(DelayedSimATTA):
             # candidates not covered too strongly by outstanding requests.
             super().select_queries(data[keep], stream_ids[keep.cpu()])
         current = self.query_anchors.num_elem() if self.query_anchors is not None else 0
+        first_stream_id = int(stream_ids[0])
+        for index in range(previous, current):
+            sample_id = int(self.query_anchors.target[index])
+            local = sample_id - first_stream_id
+            self.teacher_predictions[index] = int(teacher_predictions[local])
+            self.teacher_features[index] = teacher_features[local].cpu()
         self.query_rows.append({
             "step": self.stream_step, "pending_before_release": len(pending),
             "eligible_before": int(eligible.sum()), "eligible_after": int(keep.sum()),
@@ -120,6 +139,30 @@ class FCRA(DelayedSimATTA):
         })
         # Always return the full batch's prediction, including screened images.
         return outputs
+
+    def _record_calibration_events(self):
+        """Join newly returned truth with the teacher prediction saved at query."""
+        for index in sorted(self.received):
+            if index in self.calibrated:
+                continue
+            self.calibrated.add(index)
+            prediction = self.teacher_predictions.get(index)
+            feature = self.teacher_features.get(index)
+            if prediction is None or feature is None:
+                continue
+            label = int(self.received[index])
+            correct = int(prediction == label)
+            self.calibration_events.append((prediction, feature, correct))
+            record = self.oracle.records[index]
+            self.calibration_rows.append({
+                "step": self.stream_step, "anchor_index": index,
+                "sample_id": int(self.query_anchors.target[index]),
+                "teacher_prediction": prediction, "label": label, "correct": correct,
+                "cache_size": len(self.calibration_events),
+                "query_step": record.query_step, "return_step": record.return_step,
+                "query_domain": record.query_domain,
+                "return_domain": record.return_domain,
+            })
 
     @torch.no_grad()
     def retrieve(self):
@@ -171,6 +214,8 @@ class FCRA(DelayedSimATTA):
 
     @torch.enable_grad()
     def cluster_train(self, target_anchors, source_anchors):
+        # Calibration events must exist before the student consumes the labels.
+        self._record_calibration_events()
         target_dataset = self.retrieve()
         if target_dataset is None:
             return
@@ -254,6 +299,12 @@ class FCRA(DelayedSimATTA):
         result = super().run_stream(output_dir, progress=progress)
         output = Path(output_dir)
         write_csv(output / "query_diagnostics.csv", self.query_rows)
+        if self.calibration_rows:
+            write_csv(output / "calibration.csv", self.calibration_rows)
+        else:
+            (output / "calibration.csv").write_text(
+                "step,anchor_index,sample_id,teacher_prediction,label,correct,cache_size,"
+                "query_step,return_step,query_domain,return_domain\n", encoding="utf-8")
         if self.retrieval_rows:
             write_csv(output / "retrieval.csv", self.retrieval_rows)
         else:
