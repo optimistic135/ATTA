@@ -8,6 +8,41 @@ batch 上训练。返回真值用于更新慢速模型，并在训练前比较�
 三个 seed、查询 ID、查询时间和总优化次数取自同一份已经完成的 FCRA 结果。
 本次是固定查询计划下的适应机制验证，不验证新的主动查询策略。
 
+## 仅测试零延迟双分支适应
+
+默认 D=0 保留旧的纯主模型路径。要在即时标签条件下也启用快速适配器，执行：
+
+```bash
+python -u -m experiments.fcra_dual.run \
+  --dataset-root datasets \
+  --reference-dir /path/to/completed-fcra-results \
+  --delays 0 --enable-fast-d0 \
+  --gpus 0 1 \
+  --output-dir storage/fcra_dual/pacs_d0_fast
+```
+
+该命令只运行参考中的三个 seed，不运行 D=20/50/100。参考 manifest 仍须来自
+完整四延迟 FCRA 实验，但只加载、校验所选 D=0 的三份 trace。
+`--delays` 支持选择多个不同延迟，省略时仍运行全部四个延迟。
+
+开启后，D=0 使用和 D>0 相同的适配器、EMA、一致性损失、局部融合与预算规则。
+每批先固定主/快分支融合预测，再获取本批查询标签、评估两个分支、更新主模型，
+最后用当前图片的无标签增强视图更新适配器。本批标签不会改变已经计分的预测；
+快速损失不直接读取真实类别，但共享主模型已执行本批监督更新。
+
+总更新额度仍等于基础 FCRA：最多约 10% 额度留给快速适配器，每批最多一次；
+不满足可靠样本条件时跳过并退款给主模型。因而本实验比较的是同总优化步数下的
+双分支策略，不是保持全部原监督步数后额外增加快速训练，也不保证同 FLOPs。
+
+`manifest.json` 和 `settings.json` 记录 `enable_fast_d0`；settings/result 记录
+`fast_adapter_enabled`。启用新路径时 `reference_d0_batch_correct_match=null`，
+因为此时不再期望复现基础模型的逐批正确数。查看 `fast_updates` 和
+`adapter_updates.csv` 确认实际发生了快速更新；启用适配器不保证可靠样本充足。
+若参考总更新数小于 10，快速预算为零，不会发生快速训练。
+使用新输出目录，比较同 seed 的旧 D=0 主路径与新结果。
+
+本修改只做静态检查，不在本地执行 Python、测试、推理或实验；性能需在服务器验证。
+
 ## 服务器运行
 
 在仓库根目录、原实验环境中执行：
@@ -46,7 +81,7 @@ GPU 编号受 CUDA_VISIBLE_DEVICES 影响，单卡和双卡都要求 CUDA。双�
 
 ## 固定预算与参考校验
 
-父进程在启动 GPU 任务前读取全部 12 份 trace，校验 batch 时序、查询 ID 唯一性、
+父进程在启动 GPU 任务前读取所选延迟的全部 trace（默认 12 份），校验 batch 时序、查询 ID 唯一性、
 anchor 顺序、到期/返回时间、反馈计数和 SGD iteration 序列。记录参考文件的 SHA256；
 worker 再次核验，避免预检查后参考被改动。当前模型初始化后还会核对实际各域批次数
 和每批样本数。所有查询严格复用参考，不重新运行学生选样或 pending 冗余惩罚。
@@ -54,7 +89,7 @@ worker 再次核验，避免预检查后参考被改动。当前模型初始化�
 这些检查能核对时钟、结构、配置及权重，但旧结果没有图像内容指纹，因此仍须使用
 同一份 PACS 数据及类别目录，不能把“样本数量相同”当作图像内容相同的证明。
 
-令旧每步 SGD 次数为 u_t，T 为流总 batch 数，B=sum(u_t)。D>0 时：
+令旧每步 SGD 次数为 u_t，T 为流总 batch 数，B=sum(u_t)。D>0 或开启 `--enable-fast-d0` 时：
 
 \[
 B_A=\min(T,\lfloor B/10\rfloor),\quad B_S=B-B_A.
@@ -75,7 +110,7 @@ s_t=\left\lfloor\frac{U_tB_S}{B}\right\rfloor
     -\left\lfloor\frac{U_{t-1}B_S}{B}\right\rfloor.
 \]
 
-B=0 时所有名额均为零。D=0 时 B_A=0，逐步慢速额度恰好为 u_t，不构造适配器。
+B=0 时所有名额均为零。D=0 且未开启 `--enable-fast-d0` 时 B_A=0，逐步慢速额度恰好为 u_t，不构造适配器。
 
 没有可靠无标签样本时跳过适配器，将名额转到下一次有真实标签的慢速更新；若最后
 一批仍有退款，则在该批预测结束后用现有标签结清。末批结清不改变任何已记录预测。
@@ -86,7 +121,7 @@ B=0 时所有名额均为零。D=0 时 B_A=0，逐步慢速额度恰好为 u_t�
 \]
 
 新的损失不决定早停次数。保留主模型原 SGD 学习率 1e-3、momentum=0.9、训练
-minibatch=16 和损失，但以参考更新额度代替重新触发早停。D=0 保留旧版结构与额度，
+minibatch=16 和损失，但以参考更新额度代替重新触发早停。未开启新开关时 D=0 保留旧版结构与额度，
 不是承诺跨 GPU、依赖版本和数值环境逐位复现。result.json 的
 `reference_d0_batch_correct_match` 只审计每批正确数是否一致，不用于改变训练。
 
@@ -147,7 +182,7 @@ a_i=\exp((\cos(v,v_i)-1)/0.1)\exp(-(t-t_i^{return})/50),
 \quad \gamma=0.5\sigma(G/0.2),\quad p=(1-\gamma)p_S+\gamma p_F.
 \]
 
-无证据时 gamma=0.25；有害证据将权重压低；快速分支权重不超过0.5。D=0 固定
+无证据时 gamma=0.25；有害证据将权重压低；快速分支权重不超过0.5。D=0 未开启新开关时固定
 gamma=0。校准是局部、有偏且会过时的专家比较证据，不是当前域的无偏精度或
 USE−SKIP utility 估计，也不保证未来准确率改善。
 
@@ -164,7 +199,7 @@ USE−SKIP utility 估计，也不保证未来准确率改善。
 
 ## 输出与解释
 
-根目录：manifest.json、增量 per_seed.csv、完整12次结束后的 summary.csv/md，以及各
+根目录：manifest.json、增量 per_seed.csv、所选延迟的全部三 seed 任务结束后的 summary.csv/md，以及各
 任务日志。manifest 包含参考路径、文件哈希、源权重哈希、新旧 Git 版本和设备信息。
 失败停止新任务派发，已启动成功结果仍保存，不生成不满三个 seed 的完整均值表。
 
