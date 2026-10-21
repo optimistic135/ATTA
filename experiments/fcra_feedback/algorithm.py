@@ -18,7 +18,6 @@ DEFAULTS = {
     "fresh_minibatch_fraction": 0.5,
     "true_coefficient": 1.0,
     "pseudo_coefficient": 0.25,
-    "normalize_loss_coefficients": True,
     "fresh_rng_seed_offset": 31817,
     "fresh_policy": "round-robin over an independently shuffled pending-fresh pool",
     "zero_quota_policy": "keep released feedback waiting for the next positive quota",
@@ -319,9 +318,12 @@ class FeedbackFCRA(FCRA):
         output = Path(output_dir)
         save_rows(output / "budget.csv", self.budget_rows, "step,reference_updates,actual_updates")
         save_rows(output / "feedback_exposure.csv", list(self.exposure.values()),
-                  "anchor_index,sample_id,return_step,fresh_draws,memory_draws")
+                  "anchor_index,sample_id,query_step,return_step,query_domain,return_domain,label,"
+                  "fresh_draws,memory_draws,memory_draws_on_return_step,first_use_step,"
+                  "first_use_iteration,first_fresh_step,first_fresh_iteration")
         save_rows(output / "post_update_probe.csv", self.probe_rows,
-                  "step,domain,samples,new_returns,pre_correct,post_correct,repaired,harmed,net_correct")
+                  "step,domain,samples,new_returns,actual_updates,pre_correct,post_correct,"
+                  "changed,repaired,harmed,wrong_to_wrong,net_correct,fresh_draws")
         save_rows(output / "online_comparison.csv", self.online_rows,
                   "step,domain,samples,correct,reference_correct,paired_net_correct")
         diagnostics = {
@@ -336,6 +338,8 @@ class FeedbackFCRA(FCRA):
             if self.trace.total else None,
             "pseudo_weight_mean": sum(row["pseudo_weight"] for row in self.update_rows) / self.trace.total
             if self.trace.total else None,
+            "paired_stream_gain_pp": 100 * sum(row["paired_net_correct"] for row in self.online_rows)
+            / sum(row["samples"] for row in self.online_rows),
         }
         for phase, metric in (("before_first_feedback", "pre_feedback_accuracy_pct"),
                               ("after_first_feedback", "post_feedback_accuracy_pct"),

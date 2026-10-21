@@ -27,6 +27,7 @@ EXTRA_METRICS = (
     "feedback_updates", "full_memory_updates", "fresh_draws", "fresh_covered_labels",
     "returned_without_fresh_draws", "true_weight_mean", "pseudo_weight_mean",
     "pre_feedback_accuracy_pct", "post_feedback_accuracy_pct", "after_return_online_gain_pp",
+    "paired_stream_gain_pp",
     "stream_seconds", "main_forward_calls", "main_backward_calls",
 )
 
@@ -177,6 +178,7 @@ def summarize(rows, output, seeds):
         ("Before feedback (%)", "pre_feedback_accuracy_pct"),
         ("After feedback (%)", "post_feedback_accuracy_pct"),
         ("Online gain after return (pp)", "after_return_online_gain_pp"),
+        ("Stream gain vs reference (pp)", "paired_stream_gain_pp"),
     ]
 
     def cell(row, key):
