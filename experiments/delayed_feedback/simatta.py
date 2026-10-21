@@ -93,6 +93,10 @@ class DelayedSimATTA(SimATTA):
                 weight = merged_weight
         return super().update_anchors(anchors, data, target, feats, weight)
 
+    def on_labels_released(self, step, domain, released):
+        """Optional hook after release and before labels enter supervised memory."""
+        return None
+
     def on_batch_end(self, step, domain, data, target, outputs, released):
         """Optional post-batch hook for diagnostics; it must not affect training."""
         return None
@@ -153,6 +157,9 @@ class DelayedSimATTA(SimATTA):
                 self.source_n_clusters += 1
 
                 released = self.oracle.release(global_step, domain)
+                # Feedback scoring must happen before the label enters the
+                # supervised memory used by this batch's update.
+                self.on_labels_released(global_step, domain, released)
                 self.received.update(released)
                 self.anchors = self.labeled_anchors()
                 # The original supervised objective needs at least one returned
