@@ -1,4 +1,4 @@
-"""Four controlled PACS D=0 learning variants, with three paired seeds."""
+"""Controlled D=0 ablations plus original SimATTA at matched public settings."""
 
 import argparse
 import json
@@ -17,7 +17,8 @@ from experiments.delayed_feedback.scheduler import run_jobs
 from experiments.delayed_feedback.run import dump_json, sha256, validate_inputs, write_csv
 
 
-VARIANTS = ("simatta_control", "replay_only", "calibration_only", "full_fcra")
+CONTROLLED_VARIANTS = ("simatta_control", "replay_only", "calibration_only", "full_fcra")
+VARIANTS = CONTROLLED_VARIANTS + ("simatta_original",)
 METRICS = tuple(f"{domain}_accuracy_pct" for domain in dual.EXPERIMENT.targets) + (
     "stream_accuracy_pct", "domain_macro_accuracy_pct", "queried", "returned", "slow_updates")
 CONTRASTS = (
@@ -26,6 +27,8 @@ CONTRASTS = (
     ("replay_with_calibration", "full_fcra", "calibration_only"),
     ("calibration_with_replay", "full_fcra", "replay_only"),
     ("full_vs_control", "full_fcra", "simatta_control"),
+    ("full_vs_original", "full_fcra", "simatta_original"),
+    ("control_vs_original", "simatta_control", "simatta_original"),
 )
 
 
@@ -35,6 +38,8 @@ def parser():
     cli.add_argument("--checkpoint-dir", type=Path, default=dual.EXPERIMENT.checkpoint_dir)
     cli.add_argument("--reference-dir", type=Path, required=True)
     cli.add_argument("--output-dir", type=Path)
+    cli.add_argument("--resume", action="store_true",
+                     help="Reuse completed runs in output-dir and update its summary with missing runs")
     devices = cli.add_mutually_exclusive_group()
     devices.add_argument("--gpu-idx", type=int)
     devices.add_argument("--gpus", type=int, nargs="+")
@@ -51,7 +56,7 @@ def worker(args):
     from ATTA import args_parser, config_summoner
     from ATTA.utils.initial import reset_random_seed
     from experiments.fcra.algorithm import DEFAULTS
-    from .algorithm import AblationFCRA
+    from .algorithm import AblationFCRA, OriginalSimATTA
 
     if args.seed is None or args.variant is None or args.output_dir is None or args.gpus is not None:
         raise ValueError("Worker needs seed, variant, output-dir and one gpu-idx")
@@ -84,16 +89,21 @@ def worker(args):
         raise ValueError("Configuration differs from the reference")
     reset_random_seed(config)
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    algorithm = AblationFCRA(config, trace, args.variant)
+    algorithm = (OriginalSimATTA(config) if args.variant == "simatta_original"
+                 else AblationFCRA(config, trace, args.variant))
+    original = args.variant == "simatta_original"
     dump_json(args.output_dir / "settings.json", {
         "method": "FCRA-ablation", "dataset": "PACS",
         "variant": args.variant, "seed": args.seed, "delay": 0, "batch_size": 32,
         "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
         "source": dual.EXPERIMENT.source, "target_order": list(dual.EXPERIMENT.targets),
         "train_batch_size": config.train.train_bs, "simatta": dict(config.atta.SimATTA),
-        "fcra": DEFAULTS, "targeted_replay": algorithm.use_replay,
-        "teacher_calibration": algorithm.use_calibration, "fast_adapter_enabled": False,
-        "reference_hashes": trace.hashes, "reference_updates": trace.total,
+        "fcra": DEFAULTS, "targeted_replay": False if original else algorithm.use_replay,
+        "teacher_calibration": False if original else algorithm.use_calibration,
+        "fast_adapter_enabled": False,
+        "query_policy": "original_simatta" if original else "reference_trace",
+        "update_policy": "original_loss_early_stop" if original else "reference_quota",
+        "reference_hashes": trace.hashes, "reference_updates": None if original else trace.total,
         "checkpoint_sha256": reference["checkpoint_sha256"],
         "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
         "gpu": torch.cuda.get_device_name(args.gpu_idx),
@@ -107,9 +117,9 @@ def summarize(rows, output, seeds):
     indexed = {(row["variant"], row["seed"]): row for row in rows}
     if len(rows) != len(VARIANTS) * len(seeds) or set(indexed) != {
             (variant, seed) for variant in VARIANTS for seed in seeds}:
-        raise ValueError("Incomplete four-variant paired experiment")
+        raise ValueError("Incomplete five-variant experiment")
     for seed in seeds:
-        controls = [indexed[variant, seed] for variant in VARIANTS]
+        controls = [indexed[variant, seed] for variant in CONTROLLED_VARIANTS]
         for key in ("queried", "returned", "reference_updates", "slow_updates"):
             if len({row[key] for row in controls}) != 1:
                 raise ValueError(f"Unmatched budget for seed {seed}: {key}")
@@ -137,14 +147,24 @@ def summarize(rows, output, seeds):
                 - indexed["calibration_only", seed][metric] + indexed["simatta_control", seed][metric])
         paired.append(row)
     write_csv(output / "paired_deltas.csv", paired)
-    lines = ["# PACS D=0: no-adapter controlled ablation", "",
-             "Same source weights, stream seeds, batch=32, queries and per-batch update quotas.",
+    lines = ["# PACS D=0: controlled ablation and original SimATTA", "",
+             "All groups share source weights, stream seeds, batch=32 and training hyperparameters.",
+             "Only the four controlled groups share queries and per-batch update quotas.",
              "SimATTA-control uses its uncalibrated joint objective with uniform replay in a shared runner;",
              "it is not an end-to-end reproduction of the original query/early-stop implementation.", "",
+             "simatta_original uses the original selection, joint training and loss early stopping,",
+             "with the D=0 stream adapter's ID deduplication/tiny-cluster guards and pre-update scoring.",
+             "Its label count and update count are measured, not forced to match FCRA.", "",
              "| Variant | Art | Cartoon | Sketch | Stream | Macro |",
              "| --- | ---: | ---: | ---: | ---: | ---: |"]
     for row in summaries:
         cells = [f"{row[m + '_mean']:.2f} ± {row[m + '_std']:.2f}" for m in METRICS[:5]]
+        lines.append("| " + row["variant"] + " | " + " | ".join(cells) + " |")
+    lines += ["", "| Variant | Queried | Returned | Actual updates |",
+              "| --- | ---: | ---: | ---: |"]
+    for row in summaries:
+        cells = [f"{row[m + '_mean']:.2f} ± {row[m + '_std']:.2f}"
+                 for m in ("queried", "returned", "slow_updates")]
         lines.append("| " + row["variant"] + " | " + " | ".join(cells) + " |")
     lines += ["", "| Paired contrast | Stream delta (pp) | Positive seeds |",
               "| --- | ---: | ---: |"]
@@ -154,8 +174,49 @@ def summarize(rows, output, seeds):
                      f"{sum(value > 0 for value in values)}/{len(values)} |")
     lines += ["", "Mean ± sample SD; three paired seeds do not establish significance.",
               "Positive interaction means the combined gain exceeds the sum of isolated gains.",
+              "Contrasts involving simatta_original compare complete adaptation policies, not isolated modules;",
+              "interpret them together with label/update costs. Module attribution uses only controlled groups.",
               "Equal update counts do not imply equal FLOPs. No evaluation labels select modules or parameters."]
     (output / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def completed_result(folder, variant, seed, reference, trace, dataset_root):
+    """A result written after run_stream is the completion marker, not a CSV mean."""
+    path = folder / "result.json"
+    if not path.is_file():
+        return None
+    result = json.loads(path.read_text())
+    settings = json.loads((folder / "settings.json").read_text())
+    for record in (result, settings):
+        if (record.get("method") != "FCRA-ablation" or record.get("variant") != variant
+                or record.get("seed") != seed or record.get("delay") != 0):
+            raise ValueError(f"Cannot reuse mismatched run: {folder}")
+    if (settings["reference_hashes"] != trace.hashes
+            or settings["checkpoint_sha256"] != reference["checkpoint_sha256"]
+            or Path(settings["dataset_root"]).resolve() != dataset_root
+            or settings["batch_size"] != 32
+            or settings["simatta"] != trace.settings["simatta"]
+            or settings["train_batch_size"] != trace.settings["train_batch_size"]
+            or settings["fast_adapter_enabled"] or result["fast_updates"]):
+        raise ValueError(f"Cannot reuse a run with different settings: {folder}")
+    if variant in CONTROLLED_VARIANTS:
+        expected_flags = {
+            "simatta_control": (False, False), "replay_only": (True, False),
+            "calibration_only": (False, True), "full_fcra": (True, True),
+        }[variant]
+        if ((settings["targeted_replay"], settings["teacher_calibration"]) != expected_flags
+                or settings["fcra"] != trace.settings["fcra"]
+                or result["slow_updates"] != trace.total
+                or result["reference_updates"] != trace.total
+                or result["queried"] != len(trace.records) or result["returned"] != len(trace.records)):
+            raise ValueError(f"Cannot reuse incompatible controlled run: {folder}")
+    elif (settings.get("query_policy") != "original_simatta"
+          or settings.get("update_policy") != "original_loss_early_stop"):
+        raise ValueError(f"Cannot reuse a different SimATTA policy: {folder}")
+    if any(not (folder / name).is_file() for name in (
+            "batches.csv", "domains.csv", "feedback.csv", "updates.csv")):
+        raise ValueError(f"Completed run is missing diagnostics: {folder}")
+    return result
 
 
 def main():
@@ -170,14 +231,51 @@ def main():
         return
     if args.seed is not None or args.variant is not None:
         raise ValueError("seed and variant are worker-only arguments")
+    if args.resume and (args.output_dir is None or not args.output_dir.is_dir()):
+        raise ValueError("--resume requires an existing --output-dir")
     reference, seeds = dual.load_reference(args)
-    hashes = {str(seed): ReferenceTrace(args.reference_dir / "D0" / f"seed_{seed}", 0, seed).hashes
+    traces = {seed: ReferenceTrace(args.reference_dir / "D0" / f"seed_{seed}", 0, seed)
               for seed in seeds}
+    hashes = {str(seed): trace.hashes for seed, trace in traces.items()}
     gpus = args.gpus if args.gpus is not None else [args.gpu_idx if args.gpu_idx is not None else 0]
     if len(set(gpus)) != len(gpus) or any(gpu < 0 for gpu in gpus):
         raise ValueError("Provide distinct nonnegative GPU indices")
     output = args.output_dir or dual.ROOT / "storage/fcra_ablation" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
-    output.mkdir(parents=True, exist_ok=False)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+    rows, jobs = [], []
+    if args.resume:
+        previous = json.loads((output / "manifest.json").read_text())
+        if (previous.get("method") != "FCRA-ablation" or previous.get("dataset") != "PACS"
+                or previous.get("delay") != 0 or previous["seeds"] != seeds
+                or previous["reference_hashes"] != hashes
+                or previous["checkpoint_sha256"] != reference["checkpoint_sha256"]
+                or previous["reference_manifest_sha256"] != sha256(args.reference_dir / "manifest.json")
+                or Path(previous["dataset_root"]).resolve() != args.dataset_root):
+            raise ValueError("Existing experiment does not match the current protocol")
+        # Validate every completed run before changing any experiment files.
+        for variant in VARIANTS:
+            for seed in seeds:
+                folder = output / variant / f"seed_{seed}"
+                result = completed_result(folder, variant, seed, reference, traces[seed], args.dataset_root)
+                if result is None:
+                    jobs.append((variant, seed))
+                else:
+                    rows.append(result)
+        backup = output / "resume_history" / stamp
+        backup.mkdir(parents=True, exist_ok=False)
+        for name in ("manifest.json", "summary.md", "summary.csv", "per_seed.csv", "paired_deltas.csv"):
+            path = output / name
+            if path.is_file():
+                (backup / name).write_bytes(path.read_bytes())
+        for variant, seed in jobs:
+            folder = output / variant / f"seed_{seed}"
+            if folder.exists():
+                target = backup / variant / folder.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                folder.rename(target)
+    else:
+        output.mkdir(parents=True, exist_ok=False)
+        jobs = [(variant, seed) for variant in VARIANTS for seed in seeds]
     manifest = {
         "method": "FCRA-ablation", "status": "running", "dataset": "PACS", "delay": 0,
         "seeds": seeds, "variants": VARIANTS, "reference_hashes": hashes,
@@ -187,10 +285,18 @@ def main():
         "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=dual.ROOT, text=True).strip(),
         "gpus": gpus, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "num_workers": args.num_workers,
-        "protocol": "D0; no adapter; fixed queries and per-batch updates; two-factor learning ablation",
+        "protocol": "D0; four fixed-query/update ablations plus original SimATTA selection/early stopping",
+        "resumed": args.resume, "reused_runs": len(rows), "completed_runs": len(rows),
+        "reused_artifact_hashes": {
+            f"{row['variant']}/seed_{row['seed']}": {
+                name: sha256(output / row["variant"] / f"seed_{row['seed']}" / name)
+                for name in ("settings.json", "result.json")}
+            for row in rows},
     }
     dump_json(output / "manifest.json", manifest)
-    rows = []
+    print(f"Reusing {len(rows)} completed runs; scheduling {len(jobs)} missing runs", flush=True)
+    if rows:
+        write_csv(output / "per_seed.csv", rows)
 
     def launch(job, gpu):
         variant, seed = job
@@ -224,8 +330,8 @@ def main():
         progress.finish(result)
 
     try:
-        with ProgressDisplay(gpus, len(VARIANTS) * len(seeds)) as progress:
-            run_jobs([(variant, seed) for variant in VARIANTS for seed in seeds], gpus, launch, save)
+        with ProgressDisplay(gpus, len(jobs)) as progress:
+            run_jobs(jobs, gpus, launch, save)
         summarize(rows, output, seeds)
     except BaseException:
         manifest.update(status="failed", completed_runs=len(rows))

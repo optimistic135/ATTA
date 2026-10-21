@@ -3,6 +3,7 @@
 import torch
 
 from experiments.fcra_dual.algorithm import DualFCRA
+from experiments.delayed_feedback.simatta import DelayedSimATTA, write_csv
 
 
 VARIANTS = {
@@ -38,4 +39,35 @@ class AblationFCRA(DualFCRA):
                       targeted_replay=self.use_replay, teacher_calibration=self.use_calibration)
         if result["fast_updates"] or result["fast_adapter_enabled"]:
             raise RuntimeError("Fast adaptation leaked into the no-adapter ablation")
+        return result
+
+
+class OriginalSimATTA(DelayedSimATTA):
+    """Original selection, loaders, joint loss and early stopping at batch=32.
+
+    The D=0 stream adapter supplies causal scoring, query-ID deduplication and
+    tiny-candidate cluster protection, but never replays reference decisions.
+    """
+
+    def __init__(self, config):
+        super().__init__(config, 0)
+        self.update_rows = []
+
+    def one_step_train(self, S_data, S_targets, T_data, T_targets, alpha, optimizer):
+        loss = super().one_step_train(S_data, S_targets, T_data, T_targets, alpha, optimizer)
+        self.update_rows.append({"iteration": len(self.update_rows),
+                                 "supervised_loss": float(loss.detach()), "alpha": alpha})
+        return loss
+
+    def run_stream(self, output_dir, progress=None):
+        result = super().run_stream(output_dir, progress=progress)
+        if self.update_rows:
+            write_csv(output_dir / "updates.csv", self.update_rows)
+        else:
+            (output_dir / "updates.csv").write_text(
+                "iteration,supervised_loss,alpha\n", encoding="utf-8")
+        result.update(method="FCRA-ablation", variant="simatta_original",
+                      targeted_replay=False, teacher_calibration=False,
+                      fast_adapter_enabled=False, fast_updates=0,
+                      slow_updates=len(self.update_rows), reference_updates=None)
         return result
