@@ -121,5 +121,6 @@ class ReferenceTrace:
             for key in keys:
                 value = actual[key]
                 normalized = "" if value is None else str(value)
-                if normalized != (expected[key] or ""):
+                expected_value = "" if expected[key] in (None, "", "None") else expected[key]
+                if normalized != expected_value:
                     raise ValueError(f"Feedback schedule differs at {key}: {actual['sample_id']}")

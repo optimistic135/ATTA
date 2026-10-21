@@ -16,6 +16,16 @@ from experiments.fcra.algorithm import FCRA
 from .adapter import DEFAULTS, ExpertEvidence, ResidualAdapter
 
 
+@torch.no_grad()
+def gradient_norm(parameters):
+    norms = [parameter.grad.detach().float().norm() for parameter in parameters
+             if parameter.grad is not None]
+    norm = torch.stack(norms).norm() if norms else torch.tensor(0.0)
+    if not bool(torch.isfinite(norm)):
+        raise FloatingPointError("Non-finite optimization gradient")
+    return float(norm)
+
+
 class DualFCRA(FCRA):
     def __init__(self, config, delay, trace):
         super().__init__(config, delay)
@@ -80,6 +90,8 @@ class DualFCRA(FCRA):
         else:
             fast, gamma = slow, slow.new_zeros(len(data))
         mixed = (1 - gamma[:, None]) * slow + gamma[:, None] * fast
+        if not bool(torch.isfinite(mixed).all()):
+            raise FloatingPointError("Non-finite dual-branch prediction")
         self.last_prediction = (slow, fast, mixed, gamma)
         records = self.trace.queries[self.stream_step]
         if records:
@@ -171,6 +183,7 @@ class DualFCRA(FCRA):
                 raise FloatingPointError("Non-finite slow loss")
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            norm = gradient_norm(self.model.parameters())
             optimizer.step()
             iteration = self.slow_per_step[self.stream_step]
             self.slow_per_step[self.stream_step] += 1
@@ -181,6 +194,7 @@ class DualFCRA(FCRA):
                 "supervised_loss": float(supervised_loss.detach()),
                 "pseudo_loss": float(pseudo_loss.detach()) if pseudo_count else None,
                 "gate_mean": float(gates.mean()) if pseudo_count else None,
+                "gradient_norm": norm,
             })
         self.replay_rows.append({
             "step": self.stream_step, "returned_memory": len(indices), "updates": quota,
@@ -222,7 +236,8 @@ class DualFCRA(FCRA):
             target = (weak_logits / DEFAULTS["target_temperature"]).softmax(1)
         if not bool(mask.any()):
             self.fast_rows.append({"step": self.stream_step, "updated": False,
-                                   "reliable_samples": 0, "consistency_loss": None, "anchor_loss": None})
+                                   "reliable_samples": 0, "consistency_loss": None,
+                                   "anchor_loss": None, "gradient_norm": None})
             return False
         self.adapter.train()
         consistency = (mask * F.kl_div(self._fast_logits(strong, self.adapter).log_softmax(1),
@@ -236,6 +251,7 @@ class DualFCRA(FCRA):
         loss.backward()
         if any(parameter.grad is not None for parameter in self.model.parameters()):
             raise RuntimeError("Adapter-only update leaked gradients into the core")
+        norm = gradient_norm(self.adapter.parameters())
         self.fast_optimizer.step()
         with torch.no_grad():
             for average, parameter in zip(self.adapter_ema.parameters(), self.adapter.parameters()):
@@ -244,7 +260,7 @@ class DualFCRA(FCRA):
         self.fast_rows.append({"step": self.stream_step, "updated": True,
                                "reliable_samples": int(mask.sum()),
                                "consistency_loss": float(consistency.detach()),
-                               "anchor_loss": float(anchor.detach())})
+                               "anchor_loss": float(anchor.detach()), "gradient_norm": norm})
         return True
 
     @torch.no_grad()
@@ -341,7 +357,7 @@ class DualFCRA(FCRA):
                                 "domain": domain, "samples": sample_total, "correct": correct_total,
                                 "batches": len(loader), "accuracy_pct": 100 * correct_total / sample_total,
                                 "first10_accuracy_pct": 100 * early_correct / early_samples})
-        if self.slow_done + self.fast_done != self.trace.total or self.refund:
+        if step != self.trace.steps or self.slow_done + self.fast_done != self.trace.total or self.refund:
             raise ValueError("Actual optimization count did not match the recorded total budget")
         audit = self.oracle.audit()
         self.trace.verify_feedback(audit)
@@ -382,8 +398,8 @@ class DualFCRA(FCRA):
             ("expert_events.csv", self.expert_rows, "sample_id,anchor_index,query_step,return_step,label,slow_probability_at_query,fast_probability_at_query,slow_probability_at_return,fast_probability_at_return,gain_at_return"),
             ("calibration.csv", self.calibration_rows, "step,anchor_index,sample_id,teacher_prediction,label,correct,cache_size,query_step,return_step,query_domain,return_domain"),
             ("replay.csv", self.replay_rows, "step,returned_memory,updates,coverage,effective_sample_size,need_mean,relevance_mean,score_mean"),
-            ("updates.csv", self.update_rows, "step,iteration,returned_memory,replay_batch,source_memory,alpha,supervised_loss,pseudo_loss,gate_mean"),
-            ("adapter_updates.csv", self.fast_rows, "step,updated,reliable_samples,consistency_loss,anchor_loss"),
+            ("updates.csv", self.update_rows, "step,iteration,returned_memory,replay_batch,source_memory,alpha,supervised_loss,pseudo_loss,gate_mean,gradient_norm"),
+            ("adapter_updates.csv", self.fast_rows, "step,updated,reliable_samples,consistency_loss,anchor_loss,gradient_norm"),
             ("budget.csv", self.budget_rows, "step,reference_updates,slow_quota,fast_quota,slow_actual,fast_actual,refund_pending,elapsed_seconds"),
         ):
             if rows:
