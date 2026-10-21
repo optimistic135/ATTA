@@ -14,25 +14,50 @@
 
 ## 服务器运行
 
-在仓库根目录、原实验环境中执行：
+FCRA-G 使用一份已经完成的完整记忆 FCRA sweep 作为固定协议：查询 ID、查询时间、
+逐批监督更新次数都从参考结果重放，不重新运行查询选择或早停。参考目录必须是包含
+`manifest.json` 和 12 个 `D*/seed_*` 任务的 FCRA 根目录，不是单个 D 或 seed。
 
 ```bash
 conda activate df-atta
 
 python -u -m experiments.fcra_g.run \
   --dataset-root datasets \
+  --reference-dir /path/to/completed-fcra-results \
   --gpus 0 1 \
-  --seeds 110 123 456 \
   --output-dir storage/fcra_g/pacs_bs32_seeds110_123_456
 ```
+
+参考目录结构：
+
+```text
+completed-fcra-results/
+├── manifest.json
+├── D0/seed_.../
+│   ├── settings.json
+│   ├── result.json
+│   ├── batches.csv
+│   ├── feedback.csv
+│   └── updates.csv
+├── D20/seed_.../
+├── D50/seed_.../
+└── D100/seed_.../
+```
+
+参考必须是更新后的完整记忆 FCRA（`settings.json` 含 `replay_mix` 等字段），不能是
+早期硬 Top-16 或梯度投影版本。默认复用参考 manifest 的三个 seed；传入 `--seeds` 时
+必须与参考完全一致。程序会校验参考 manifest、数据流批次数、查询 anchor 顺序、
+到期/返回时间、监督更新序列、源权重 SHA256，并在 worker 启动后再次校验参考文件
+哈希。参考 trace 没有图像内容指纹，因此仍必须使用同一份 PACS 数据和相同的域内
+样本顺序；“批次数相同”不等于图像内容相同。
 
 双卡时每张卡同时运行一个完整任务，空闲卡自动领取下一任务。单卡：
 
 ```bash
 python -u -m experiments.fcra_g.run \
   --dataset-root datasets \
+  --reference-dir /path/to/completed-fcra-results \
   --gpu-idx 0 \
-  --seeds 110 123 456 \
   --output-dir storage/fcra_g/pacs_bs32_seeds110_123_456
 ```
 
@@ -40,13 +65,14 @@ python -u -m experiments.fcra_g.run \
 
 ```bash
 CUDA_VISIBLE_DEVICES=2,3 python -u -m experiments.fcra_g.run \
-  --dataset-root datasets --gpus 0 1 \
-  --seeds 110 123 456 \
+  --dataset-root datasets \
+  --reference-dir /path/to/completed-fcra-results \
+  --gpus 0 1 \
   --output-dir storage/fcra_g/pacs_bs32_seeds110_123_456
 ```
 
-`--gpu-idx` 与 `--gpus` 互斥。`--seeds` 必须是三个不同整数；不传时自动抽取三个
-seed，四个 D 共用。默认输出 `storage/fcra_g/<UTC时间>/`，已有目录会报错。
+`--gpu-idx` 与 `--gpus` 互斥。默认输出 `storage/fcra_g/<UTC时间>/`，已有目录会报错。
+不使用参考的独立调试模式没有提供；固定协议验证要求参考目录。
 
 默认检查点目录与现有 PACS 入口相同：
 
@@ -65,22 +91,25 @@ storage/checkpoints/round1/PACS/[2, 0, 1, 3]/ResNet18_3l_meanpool_0dp_Truefzbn/0
 - online batch size = 32；
 - D = 0、20、50、100；
 - 每个 D 使用相同三个 seed；
-- 旧 FCRA 的查询选择规则与查询时间；
-- 旧 FCRA 的逐批早停监督更新结构和训练 minibatch = 16；
+- 参考 FCRA 的查询 ID、查询时间和逐批监督更新次数；
+- 原 FCRA 的完整记忆重放、伪监督门控与训练 minibatch = 16；
 - ResNet18、冻结 BN、dropout=0、SGD lr=1e-3、momentum=0.9、`eh/el`、
   `cold_start`、`nc_increase`、`stop_tol` 等 SimATTA 配置；
 - 评价指标：三个目标域准确率、stream accuracy、domain macro accuracy、
   queried/returned/cross-domain/pending。
 
 FCRA-G 不向图模块分配监督预算，也不减少原 FCRA 的监督更新次数。图求解没有神经
-网络反向传播；但额外前向、图构建和求解时间必须单独报告。
+网络反向传播；但额外前向、图构建和求解时间必须单独报告。参考 trace 固定的是逐批
+更新次数，不保证每次 minibatch 的随机抽样与旧运行逐次相同；监督损失、完整记忆
+重放、伪监督门控和训练 minibatch 大小保持不变。
 
 ## 每批时序
 
 D>0 时，每个全局 batch 依次执行：
 
 1. 读取当前无标签 batch。
-2. 继承 FCRA 先固定主模型预测与查询计划。查询选择只读取当前主模型预测，不读取真值。
+2. 计算主模型预测；按参考 trace 插入本步查询 anchor，复用查询 ID、查询时间和
+   anchor 顺序，不重新运行查询选择。
 3. 确定本批专家权重；对已有累计证据先做时间衰减。
 4. 用当前 batch 与近期无标签记忆构图，并从完整监督记忆选择真实标签锚点。
 5. 求解校正概率 `Q_U` 和锚点影响量 `h`。
@@ -88,21 +117,21 @@ D>0 时，每个全局 batch 依次执行：
 7. 为被查询样本保存查询时的三个专家概率、最终概率和当前权重。
 8. 释放本批到期标签。
 9. 在训练前用查询时保存的预测评分三个专家，更新后续 batch 的证据。
-10. 将新返回样本加入完整监督记忆；执行原 FCRA 监督与伪监督训练。
+10. 将新返回样本加入完整监督记忆；按参考 trace 的逐批更新次数执行原 FCRA
+    监督与伪监督训练，不重新触发早停。
 11. 更新近期无标签记忆，进入下一批。
 
-为严格复用旧 FCRA 的查询 ID 与查询时间，本实现先调用继承的查询规划。该规划只
-使用主模型预测、特征和 pending 信息，与本批图计算相互独立；图校正仍在任何标签
-释放和模型更新之前完成。评价真值只用于在线指标和 `graph.csv` 的离线诊断，不进入
-图构建、专家权重或训练。
+查询计划、anchor 顺序、到期/返回步和监督更新序列都从参考 FCRA 读取并校验。
+图校正在任何标签释放和模型更新之前完成。评价真值只用于在线指标和 `graph.csv`
+的离线诊断，不进入图构建、专家权重或训练。
 
 实现上，当前 batch 在构图完成、查询时专家预测保存之后立即加入 \(M_U\)。D>0 时当前
 batch 的真值本批不可能返回；到期返回的旧样本在评分时从 \(M_U\) 移除。因此下一批
 看到的 \(M_U\) 与“训练结束后再更新”的状态一致，且图记忆不会影响本批已经固定的
 预测。
 
-D=0 完全绕过新增机制：不构图、不维护无标签图记忆、不启用专家融合、不评分专家，
-直接使用原 FCRA 路径。
+D=0 完全绕过新增机制：仍按参考 trace 重放查询和监督更新次数，但不构图、不维护
+无标签图记忆、不启用专家融合、不评分专家，预测与训练使用原 FCRA 路径。
 
 ## 两类记忆
 
@@ -315,15 +344,16 @@ w_k=\frac{\pi_k\exp(\eta S_k)}{\sum_j\pi_j\exp(\eta S_j)}.
 
 | 文件 | 内容 |
 |---|---|
-| `manifest.json` | FCRA-G、固定 D、三个 seed、batch size、Git 版本、数据/权重哈希、GPU 与状态 |
-| `per_seed.csv` | 每次成功任务的准确率、反馈计数及成本字段 |
+| `manifest.json` | FCRA-G、固定 D、参考目录/哈希、三个 seed、batch size、Git 版本、数据/权重哈希、GPU 与状态 |
+| `per_seed.csv` | 每次成功任务的准确率、反馈计数、参考/实际更新次数及成本字段 |
 | `summary.csv`、`summary.md` | 四个 D 的三个 seed 均值 ± 样本标准差 |
-| `D*/seed_*/settings.json` | 实际 FCRA/FCRA-G 设置、图与专家超参数、设备与版本 |
+| `D*/seed_*/settings.json` | 实际 FCRA/FCRA-G 设置、参考哈希、图与专家超参数、设备与版本 |
 | `D*/seed_*/result.json` | 该次完整运行结果，method=FCRA-G |
+| `D*/seed_*/reference_budget.csv` | 参考逐步查询数和监督更新额度 |
 | `D*/seed_*/batches.csv` | 更新前逐批准确率、查询/返回/pending |
 | `D*/seed_*/domains.csv` | 各域准确率及反馈审计 |
 | `D*/seed_*/feedback.csv` | 查询步、到期步、返回步、域 |
-| `D*/seed_*/query_diagnostics.csv` | PCFR pending 惩罚前后候选数与新查询数 |
+| `D*/seed_*/query_diagnostics.csv` | 参考查询计划的新查询数；候选数/冗余字段在参考模式下为空 |
 | `D*/seed_*/replay.csv` | 完整监督记忆的 need/relevance/score、重放概率与覆盖 |
 | `D*/seed_*/calibration.csv` | 教师预测、真值、是否正确、缓存大小 |
 | `D*/seed_*/updates.csv` | 每次 SGD 的监督/伪监督损失、alpha、门控统计 |
@@ -331,7 +361,10 @@ w_k=\frac{\pi_k\exp(\eta S_k)}{\sum_j\pi_j\exp(\eta S_j)}.
 | `D*/seed_*/expert_feedback.csv` | 每个返回事件的查询时专家概率、损失与截断增益 |
 | `D*/seed_*/costs.json` | 前向次数、图/求解/训练/总耗时、峰值显存 |
 
-D=0 仍输出 `graph.csv` 与 `expert_feedback.csv` 表头，但图路径未启用。
+D=0 仍按参考 trace 重放查询和监督更新次数，但不构图、不维护图记忆、不启用专家
+融合，仍输出 `graph.csv` 与 `expert_feedback.csv` 表头。运行结束会逐步核对实际
+监督更新次数与参考 `updates.csv` 一致，并核对总查询/返回事件与参考反馈计划；不一致
+则任务失败。
 
 ## 待验证假设
 
