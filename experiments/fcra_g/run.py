@@ -1,4 +1,4 @@
-"""Run only FCRA-G on PACS: four batch delays and three common stream seeds."""
+"""Run FCRA-G on PACS with recorded FCRA queries and per-step update budgets."""
 
 import argparse
 import json
