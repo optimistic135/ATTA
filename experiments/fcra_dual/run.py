@@ -36,6 +36,10 @@ def parser():
     devices.add_argument("--gpu-idx", type=int, help="One GPU (default: 0)")
     devices.add_argument("--gpus", type=int, nargs="+", help="One independent worker per GPU, e.g. 0 1")
     cli.add_argument("--num-workers", type=int, default=0)
+    cli.add_argument("--delays", type=int, nargs="+", choices=DELAYS, default=list(DELAYS),
+                     help="Delays to run; use --delays 0 for immediate-label experiments")
+    cli.add_argument("--enable-fast-d0", action="store_true",
+                     help="Enable the fast adapter and reserve its update budget also at D=0")
     cli.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     cli.add_argument("--delay", type=int, choices=DELAYS, help=argparse.SUPPRESS)
     cli.add_argument("--seed", type=int, help=argparse.SUPPRESS)
@@ -80,10 +84,12 @@ def run_worker(args):
     if args.seed not in seeds:
         raise ValueError("Worker seed is not in reference sweep")
     trace = ReferenceTrace(args.reference_dir / f"D{args.delay}" / f"seed_{args.seed}",
-                           args.delay, args.seed)
+                           args.delay, args.seed, enable_fast_d0=args.enable_fast_d0)
     parent = json.loads((args.output_dir.parent.parent / "manifest.json").read_text())
     key = f"D{args.delay}/seed_{args.seed}"
-    if (parent["reference_hashes"][key] != trace.hashes
+    if (parent["enable_fast_d0"] != args.enable_fast_d0
+            or args.delay not in parent["delays"]
+            or parent["reference_hashes"][key] != trace.hashes
             or parent["reference_manifest_sha256"] != sha256(args.reference_dir / "manifest.json")):
         raise ValueError("Reference changed after sweep preflight")
     config = config_summoner(args_parser([
@@ -112,6 +118,7 @@ def run_worker(args):
         "reference_dir": str(args.reference_dir), "reference_hashes": trace.hashes,
         "fcra": CORE_DEFAULTS, "dual": DEFAULTS, "simatta": dict(config.atta.SimATTA),
         "reference_updates": trace.total, "reserved_fast": trace.fast_total,
+        "enable_fast_d0": args.enable_fast_d0, "fast_adapter_enabled": trace.fast_enabled,
         "gpu_idx": args.gpu_idx, "gpu_name": torch.cuda.get_device_name(args.gpu_idx),
         "num_workers": args.num_workers, "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
@@ -121,15 +128,15 @@ def run_worker(args):
     dump_json(args.output_dir / "result.json", result)
 
 
-def summarize(rows, output, seeds):
-    expected = {(delay, seed) for delay in DELAYS for seed in seeds}
+def summarize(rows, output, seeds, delays):
+    expected = {(delay, seed) for delay in delays for seed in seeds}
     identities = [(row["delay"], row["seed"]) for row in rows]
     if (set(identities) != expected or len(identities) != len(expected)
             or any(row.get("method") != METHOD for row in rows)):
-        raise ValueError("Summary requires 12 completed dual FCRA runs")
+        raise ValueError("Summary requires all selected delays and three reference seeds")
     summaries = []
     metrics = EXPERIMENT.metrics + EXTRA_METRICS
-    for delay in DELAYS:
+    for delay in delays:
         group = [row for row in rows if row["delay"] == delay]
         summary = {"method": METHOD, "delay": delay, "runs": 3}
         for metric in metrics:
@@ -164,6 +171,7 @@ def summarize(rows, output, seeds):
     transitions = table([(f"{domain}: first 10 batches (%)", f"{domain}_first10_accuracy_pct")
                          for domain in EXPERIMENT.targets])
     text = ("# Dual-timescale FCRA: PACS\n\nPhoto → Art → Cartoon → Sketch; batch size=32. "
+            f"Fast adapter enabled at D=0: {next((row['fast_adapter_enabled'] for row in rows if row['delay'] == 0), 'N/A')}. "
             f"Common reference seeds: {seeds}. Mean ± sample standard deviation.\n\n" + accuracy +
             "\n" + costs + "\n" + transitions +
             "\nAccuracy is recorded before updates. The first return batch is included "
@@ -177,6 +185,8 @@ def summarize(rows, output, seeds):
 
 def main():
     args = parser().parse_args()
+    if len(set(args.delays)) != len(args.delays):
+        raise ValueError("Provide distinct delays")
     args.dataset = "PACS"
     args.dataset_root = args.dataset_root.resolve()
     args.checkpoint_dir = args.checkpoint_dir.resolve()
@@ -191,9 +201,10 @@ def main():
     validate_inputs(args)
     reference, seeds = load_reference(args)
     reference_hashes = {}
-    for delay in DELAYS:
+    for delay in args.delays:
         for seed in seeds:
-            trace = ReferenceTrace(args.reference_dir / f"D{delay}" / f"seed_{seed}", delay, seed)
+            trace = ReferenceTrace(args.reference_dir / f"D{delay}" / f"seed_{seed}", delay, seed,
+                                   enable_fast_d0=args.enable_fast_d0)
             reference_hashes[f"D{delay}/seed_{seed}"] = trace.hashes
     gpus = args.gpus if args.gpus is not None else [args.gpu_idx if args.gpu_idx is not None else 0]
     if len(set(gpus)) != len(gpus) or any(gpu < 0 for gpu in gpus):
@@ -203,7 +214,8 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     manifest = {
         "method": METHOD, "dataset": "PACS", "status": "running", "seeds": seeds,
-        "delays": list(DELAYS), "batch_size": BATCH_SIZE,
+        "delays": args.delays, "batch_size": BATCH_SIZE,
+        "enable_fast_d0": args.enable_fast_d0,
         "reference_dir": str(args.reference_dir), "reference_hashes": reference_hashes,
         "reference_manifest_sha256": sha256(args.reference_dir / "manifest.json"),
         "reference_commit": reference["git_commit"],
@@ -224,6 +236,8 @@ def main():
                    "--reference-dir", str(args.reference_dir), "--delay", str(delay), "--seed", str(seed),
                    "--dataset-root", str(args.dataset_root), "--checkpoint-dir", str(args.checkpoint_dir),
                    "--output-dir", str(folder), "--gpu-idx", str(gpu), "--num-workers", str(args.num_workers)]
+        if args.enable_fast_d0:
+            command.append("--enable-fast-d0")
         progress.start(gpu, delay, seed)
         log_path = output / f"D{delay}_seed_{seed}.log"
         with log_path.open("w", encoding="utf-8") as log:
@@ -249,14 +263,14 @@ def main():
         progress.finish(result)
 
     try:
-        with ProgressDisplay(gpus, 12) as progress:
-            run_jobs([(delay, seed) for delay in DELAYS for seed in seeds], gpus, launch, save_result)
-        summarize(rows, output, seeds)
+        with ProgressDisplay(gpus, len(args.delays) * len(seeds)) as progress:
+            run_jobs([(delay, seed) for delay in args.delays for seed in seeds], gpus, launch, save_result)
+        summarize(rows, output, seeds, args.delays)
     except BaseException:
         manifest.update(status="failed", completed_runs=len(rows))
         dump_json(output / "manifest.json", manifest)
         raise
-    manifest.update(status="complete", completed_runs=12)
+    manifest.update(status="complete", completed_runs=len(rows))
     dump_json(output / "manifest.json", manifest)
 
 
