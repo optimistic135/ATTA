@@ -38,7 +38,7 @@ class DualFCRA(FCRA):
             raise ValueError("Current dataset stream and reference batch structure differ")
         self.fast_rng = torch.Generator().manual_seed((config.random_seed + 71933) % 2**32)
         self.adapter, self.adapter_ema, self.fast_optimizer = None, None, None
-        if delay > 0:
+        if trace.fast_enabled:
             # Initialization must not consume the main model's CPU/CUDA RNG.
             with torch.random.fork_rng(devices=[]):
                 torch.set_rng_state(self.fast_rng.get_state())
@@ -365,6 +365,7 @@ class DualFCRA(FCRA):
             row.update(self.oracle.counts(row["domain"]))
         result = {
             "method": "FCRA-dual", "seed": self.config.random_seed, "delay": self.oracle.delay,
+            "fast_adapter_enabled": self.adapter is not None,
             **{f"{row['domain']}_accuracy_pct": row["accuracy_pct"] for row in domain_rows},
             **{f"{row['domain']}_first10_accuracy_pct": row["first10_accuracy_pct"] for row in domain_rows},
             "stream_accuracy_pct": 100 * sum(row["correct"] for row in domain_rows) / offset,
@@ -376,7 +377,7 @@ class DualFCRA(FCRA):
                 "teacher_forward_images", "slow_backward_calls", "slow_backward_images")},
             **self.oracle.counts(),
         }
-        if self.oracle.delay == 0:
+        if self.oracle.delay == 0 and self.adapter is None:
             result["reference_d0_batch_correct_match"] = all(
                 actual["correct"] == int(reference["correct"])
                 for actual, reference in zip(batch_rows, self.trace.batches))

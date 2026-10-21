@@ -20,7 +20,8 @@ def optional_int(value):
 class ReferenceTrace:
     """Only IDs/times/costs are a protocol; reference accuracy never drives training."""
 
-    def __init__(self, folder, delay, seed):
+    def __init__(self, folder, delay, seed, enable_fast_d0=False):
+        self.fast_enabled = delay > 0 or enable_fast_d0
         self.folder = Path(folder)
         names = ("settings.json", "result.json", "batches.csv", "feedback.csv", "updates.csv")
         self.hashes = {name: sha256(self.folder / name) for name in names}
@@ -91,7 +92,7 @@ class ReferenceTrace:
                 self.old_updates[step] += 1
                 last_step = step
         self.total = sum(self.old_updates)
-        self.fast_total = min(self.steps, self.total // 10) if delay > 0 else 0
+        self.fast_total = min(self.steps, self.total // 10) if self.fast_enabled else 0
         slow_total = self.total - self.fast_total
         self.slow, self.fast = [], []
         cumulative, allocated = 0, 0
