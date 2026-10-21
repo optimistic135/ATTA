@@ -1,6 +1,6 @@
 """FCRA-G: delayed-label anchored online graph correction on PACS."""
 
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 import json
 import math
 from pathlib import Path
@@ -48,8 +48,21 @@ EXPERT_HEADER = (
 class GraphFCRA(FCRA):
     """Keep FCRA's supervised path and add a non-parametric graph prediction path."""
 
-    def __init__(self, config, delay):
+    def __init__(self, config, delay, trace=None):
         super().__init__(config, delay)
+        self.trace = trace
+        self.reference_mode = trace is not None
+        if self.reference_mode:
+            structure = [
+                (self.experiment.domains[env],
+                 min(config.atta.batch_size, len(loader.sampler) - start))
+                for env in config.dataset.test_envs[1:]
+                for loader in [self.fast_loader[env]]
+                for start in range(0, len(loader.sampler), config.atta.batch_size)
+            ]
+            expected = [(row["domain"], int(row["samples"])) for row in trace.batches]
+            if structure != expected:
+                raise ValueError("Current dataset stream and reference batch structure differ")
         self.graph_enabled = delay > 0
         self.unlabeled_memory = OrderedDict()
         self.query_expert_predictions = {}
@@ -101,6 +114,8 @@ class GraphFCRA(FCRA):
 
     @torch.no_grad()
     def select_queries(self, data, stream_ids):
+        if self.reference_mode:
+            return self._select_queries_from_trace(data, stream_ids)
         previous = self.query_anchors.num_elem() if self.query_anchors is not None else 0
         # The inherited FCRA path fixes the query plan and the calibration
         # teacher cache first; graph correction never changes query IDs/times.
@@ -114,6 +129,58 @@ class GraphFCRA(FCRA):
         source_features = F.normalize(source_raw, dim=1)
         corrected = self._graph_correct(data, stream_ids, main_probs, source_features)
         current = self.query_anchors.num_elem() if self.query_anchors is not None else 0
+        if current > previous:
+            self._save_query_predictions(previous, current, stream_ids)
+        self._add_unlabeled_batch(data, stream_ids, source_features)
+        return corrected
+
+    @torch.no_grad()
+    def _select_queries_from_trace(self, data, stream_ids):
+        """Replay the recorded FCRA query IDs and timing exactly."""
+        self.stream_step += 1
+        self.current_data = data.detach()
+        self.model.eval()
+        features = self.model[0](data)
+        outputs = self.model[1](features)
+        previous = self.query_anchors.num_elem() if self.query_anchors is not None else 0
+        records = self.trace.queries[self.stream_step]
+        expected = list(range(previous, previous + len(records)))
+        if [int(row["anchor_index"]) for row in records] != expected:
+            raise ValueError("Reference anchor insertion order changed")
+        if any(int(row["query_step"]) != self.stream_step for row in records):
+            raise ValueError("Reference query step differs from the stream clock")
+        first_stream_id = int(stream_ids[0])
+        positions = torch.tensor([int(row["sample_id"]) - first_stream_id
+                                  for row in records], dtype=torch.long)
+        if len(positions) and (int(positions.min()) < 0 or int(positions.max()) >= len(data)):
+            raise ValueError("Reference query is outside the current batch")
+        if records:
+            device_positions = positions.to(data.device)
+            self.query_anchors = self.update_anchors(
+                self.query_anchors, data[device_positions].cpu(), stream_ids[positions],
+                features[device_positions].cpu(), torch.ones(len(positions)))
+            self.teacher.eval()
+            teacher_raw = self.teacher[0](data[device_positions])
+            teacher_features = F.normalize(teacher_raw, dim=1)
+            teacher_predictions = self.teacher[1](teacher_raw).argmax(1)
+            for offset, index in enumerate(expected):
+                self.teacher_predictions[index] = int(teacher_predictions[offset])
+                self.teacher_features[index] = teacher_features[offset].cpu()
+        current = self.query_anchors.num_elem() if self.query_anchors is not None else 0
+        pending = sum(1 for index in range(previous) if index not in self.received)
+        self.query_rows.append({
+            "step": self.stream_step, "pending_before_release": pending,
+            "eligible_before": None, "eligible_after": None, "suppressed": None,
+            "new_queries": current - previous, "mean_redundancy": None,
+        })
+        if not self.graph_enabled:
+            return outputs
+        self._decay_and_compute_expert_weights()
+        main_probs = outputs.softmax(1)
+        self.teacher.eval()
+        source_raw = self.teacher[0](data)
+        source_features = F.normalize(source_raw, dim=1)
+        corrected = self._graph_correct(data, stream_ids, main_probs, source_features)
         if current > previous:
             self._save_query_predictions(previous, current, stream_ids)
         self._add_unlabeled_batch(data, stream_ids, source_features)
@@ -379,10 +446,88 @@ class GraphFCRA(FCRA):
             })
         self.expert_evidence += gains
 
+    @torch.enable_grad()
+    def _train_supervised_quota(self, quota):
+        """Run exactly the recorded number of FCRA supervised updates."""
+        if quota <= 0:
+            return
+        indices, data, labels = self._supervised_memory()
+        if not indices:
+            return
+        need, relevance, score, probabilities = self._replay_statistics(data, labels)
+        reference = self.source_anchors
+        has_pseudo = reference is not None and reference.num_elem() > 0
+        pseudo_count = reference.num_elem() if has_pseudo else 0
+        returned = len(indices)
+        alpha = returned / (returned + pseudo_count) if has_pseudo else 1.0
+        if has_pseudo and pseudo_count < self.cold_start:
+            alpha = min(0.2, alpha)
+        size = self.config.train.train_bs
+        self.model.train()
+        optimizer = torch.optim.SGD(self.model.parameters(),
+                                    lr=self.config.atta.SimATTA.lr, momentum=0.9)
+        draws = torch.zeros(returned)
+        for iteration in range(quota):
+            sampled = torch.multinomial(probabilities, size, replacement=True)
+            images = data[sampled].to(self.config.device)
+            targets = labels[sampled].to(self.config.device)
+            draws.index_add_(0, sampled, torch.ones(size))
+            losses = F.cross_entropy(self.model(images), targets, reduction="none")
+            supervised_loss = losses.mean()
+            pseudo_loss, gates = None, None
+            if has_pseudo:
+                pseudo_indices = torch.randint(0, pseudo_count, (size,))
+                pseudo_labels = reference.target[pseudo_indices].to(
+                    self.config.device).long()
+                teacher_features = F.normalize(
+                    reference.feats[pseudo_indices].to(self.config.device), dim=1)
+                gates = self._feedback_gates(teacher_features, pseudo_labels)
+                pseudo_loss = (gates * F.cross_entropy(
+                    self.model(reference.data[pseudo_indices].to(self.config.device)),
+                    pseudo_labels, reduction="none")).mean()
+                loss = alpha * supervised_loss + (1 - alpha) * pseudo_loss
+            else:
+                loss = supervised_loss
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            self.update_rows.append({
+                "step": self.stream_step, "iteration": iteration,
+                "returned_memory": returned, "replay_batch": int(len(sampled)),
+                "source_memory": pseudo_count, "alpha": alpha,
+                "has_pseudo": has_pseudo,
+                "supervised_loss": float(supervised_loss.detach()),
+                "pseudo_loss": float(pseudo_loss.detach()) if has_pseudo else None,
+                "gate_mean": float(gates.mean()) if has_pseudo else None,
+                "gate_min": float(gates.min()) if has_pseudo else None,
+                "gate_max": float(gates.max()) if has_pseudo else None,
+                "drawn_probability_mean": float(probabilities[sampled].mean()),
+                "calibration_cache": len(self.calibration_events),
+            })
+        distinct = int((draws > 0).sum())
+        self.replay_rows.append({
+            "step": self.stream_step, "returned_memory": returned,
+            "updates": quota, "source_memory": pseudo_count,
+            "need_mean": float(need.mean()), "need_max": float(need.max()),
+            "relevance_mean": float(relevance.mean()),
+            "score_mean": float(score.mean()), "score_max": float(score.max()),
+            "probability_min": float(probabilities.min()),
+            "probability_max": float(probabilities.max()),
+            "effective_sample_size": float(1 / probabilities.square().sum()),
+            "distinct_sampled": distinct,
+            "coverage": distinct / returned,
+            "max_draws": int(draws.max()),
+        })
+
     def cluster_train(self, target_anchors, source_anchors):
         self._score_expert_feedback()
         started = time.perf_counter()
-        result = super().cluster_train(target_anchors, source_anchors)
+        if self.reference_mode:
+            self._record_calibration_events()
+            self._train_supervised_quota(self.trace.old_updates[self.stream_step])
+            result = None
+        else:
+            result = super().cluster_train(target_anchors, source_anchors)
         self.training_seconds += time.perf_counter() - started
         return result
 
@@ -427,6 +572,26 @@ class GraphFCRA(FCRA):
             torch.cuda.reset_peak_memory_stats(self.config.device)
         started = time.perf_counter()
         result = super().run_stream(output_dir, progress=progress)
+        if self.reference_mode:
+            self.trace.verify_feedback(self.oracle.audit())
+            actual_by_step = Counter(row["step"] for row in self.update_rows)
+            mismatches = [
+                (step, actual_by_step.get(step, 0), expected)
+                for step, expected in enumerate(self.trace.old_updates)
+                if actual_by_step.get(step, 0) != expected
+            ]
+            if mismatches:
+                raise ValueError(
+                    "Per-step supervised update counts differ from reference: "
+                    f"{mismatches[:3]}")
+            actual_updates = len(self.update_rows)
+            if actual_updates != self.trace.total:
+                raise ValueError(
+                    f"Actual supervised updates {actual_updates} differ from reference "
+                    f"{self.trace.total}")
+            result["reference_updates"] = self.trace.total
+            result["reference_queries"] = len(self.trace.records)
+            result["actual_supervised_updates"] = actual_updates
         output = Path(output_dir)
         if self.graph_rows:
             write_csv(output / "graph.csv", self.graph_rows)
