@@ -13,6 +13,25 @@ FCRA sweep 的查询 ID、查询时间和逐批监督更新次数，以固定标
 
 本方法是待验证的研究方案，不保证优于现有 FCRA。
 
+## 已完成实验的离线诊断
+
+使用现有 CSV 分解预测修改，不加载数据、模型或 GPU，也不重跑实验：
+
+```bash
+python -m experiments.fcra_g.analyze \
+  --results-dir storage/fcra_g/pacs_bs32_seeds110_123_456 \
+  --reference-dir storage/fcra/pacs_bs32_seeds110_123_456
+```
+
+默认写入新的 `diagnostics/`，不覆盖原始结果；已有目录需通过 `--output-dir` 指定新路径。
+输出 `report.md`、`summary.csv`、`per_run.csv`、`batch_audit.csv`、
+`feedback_summary.csv` 和输入哈希清单。保留逐 seed 差值、各域及首次反馈前后指标。
+
+注意 `graph.csv` 的 `changed_incorrect` 包含正确变错误和错到错，不能直接当作破坏数。
+工具根据正确数恒等式重建修复/破坏/错到错，并校验结果一致性。
+完整证据边界、静态结构分析和条件化算法设计见 [ANALYSIS_DESIGN.md](ANALYSIS_DESIGN.md)。
+本轮没有修改 FCRA-G 的预测或训练路径，也没有在本地运行分析脚本。
+
 ## 服务器运行
 
 FCRA-G 使用一份已经完成的完整记忆 FCRA sweep 作为固定协议：查询 ID、查询时间、
