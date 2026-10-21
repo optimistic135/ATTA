@@ -93,6 +93,10 @@ class DelayedSimATTA(SimATTA):
                 weight = merged_weight
         return super().update_anchors(anchors, data, target, feats, weight)
 
+    def on_batch_end(self, step, domain, data, target, outputs, released):
+        """Optional post-batch hook for diagnostics; it must not affect training."""
+        return None
+
     def labeled_anchors(self):
         if not self.received:
             return None
@@ -160,6 +164,9 @@ class DelayedSimATTA(SimATTA):
                     # Pending samples are unlabeled inputs; refreshing their
                     # features uses no truth and preserves clustering geometry.
                     self.query_anchors = self.update_anchors_feats(self.query_anchors)
+                # Diagnostics may use the already-fixed batch prediction and
+                # evaluation truth, but must never feed either into training.
+                self.on_batch_end(global_step, domain, data, target, outputs, released)
                 batch_rows.append({
                     "seed": self.config.random_seed, "delay": self.oracle.delay,
                     "step": global_step, "domain": domain, "domain_step": domain_step,
