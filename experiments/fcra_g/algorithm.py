@@ -66,14 +66,24 @@ class GraphFCRA(FCRA):
         self.graph_edge_total = 0
         self.main_forward_calls = 0
         self.teacher_forward_calls = 0
+        self.main_model_calls = 0
+        self.teacher_model_calls = 0
         self.memory_forward_calls = 0
         self.memory_forward_images = 0
         self.current_expert_probs = None
         self.current_output_probs = None
         self.current_h = None
         self.current_graph_stats = None
+        self.model.register_forward_hook(self._count_main_model_forward)
+        self.teacher.register_forward_hook(self._count_teacher_model_forward)
         self.model[0].register_forward_hook(self._count_main_forward)
         self.teacher[0].register_forward_hook(self._count_teacher_forward)
+
+    def _count_main_model_forward(self, module, inputs, output):
+        self.main_model_calls += 1
+
+    def _count_teacher_model_forward(self, module, inputs, output):
+        self.teacher_model_calls += 1
 
     def _count_main_forward(self, module, inputs, output):
         self.main_forward_calls += 1
@@ -440,6 +450,8 @@ class GraphFCRA(FCRA):
                                  if self.graph_batches else 0.0),
             "main_encoder_forward_calls": self.main_forward_calls,
             "teacher_encoder_forward_calls": self.teacher_forward_calls,
+            "main_model_forward_calls": self.main_model_calls,
+            "teacher_model_forward_calls": self.teacher_model_calls,
             "graph_memory_forward_calls": self.memory_forward_calls,
             "graph_memory_forward_images": self.memory_forward_images,
             "peak_cuda_memory_mb": (torch.cuda.max_memory_allocated(self.config.device)
