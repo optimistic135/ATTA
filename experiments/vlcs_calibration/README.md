@@ -17,8 +17,49 @@ python -u -m experiments.vlcs_calibration.run \
 不需要 `--reference-dir`，程序自动先运行每个 seed 的原始 SimATTA，再复用其记录。
 每个 GPU 一次运行一个 seed 的流水线；每组在全新的 Python 子进程中运行，重新加载
 相同源权重、初始化随机数和数据流，避免组间模型/随机数污染。
-输出目录必须是新目录，不覆盖 PACS、门控诊断或旧 VLCS 结果；本入口暂不支持续跑。
+默认输出目录必须是新目录，不覆盖 PACS、门控诊断或旧 VLCS 结果。
+要继续已有 VLCS 运行，使用下面的 `--resume` 命令。
 失败时停止派发新 seed，已运行的结果留在各组目录和日志，不生成不完整的均值表。
+
+## 汇总字段错误后的恢复与续跑
+
+原始 SimATTA 与控制组有不同诊断字段。当前 CSV 写入使用所有结果字段的并集，
+缺失字段留空，保留额外字段；先写临时文件再替换，避免写入失败破坏旧表。
+如旧代码在 per_seed.csv 报 `dict contains fields not in fieldnames`，通常各组训练已经
+成功，result.json 仍然完整。不要删除结果目录，更新代码后执行：
+
+```bash
+python -u -m experiments.vlcs_calibration.run \
+  --dataset-root datasets \
+  --gpus 0 1 \
+  --output-dir storage/vlcs_calibration/d0_seeds110_123_456 \
+  --resume
+```
+
+使用原来的 seed、数据路径、源权重与 num-workers。可改变 GPU 分配。
+若 seed=110/123 的三组均已完成，应显示：
+
+```text
+Reusing 6 completed runs; scheduling 3 missing runs
+```
+
+程序不信任旧 per_seed.csv，以各目录有效的 result.json 作为完成标志，同时校验
+settings、身份、原始参考哈希、数据路径、权重、诊断文件和预算。已完成的原始组
+也校验整个 NativeTrace；已完成的控制/校准组必须匹配该原始组。字段不匹配或
+损坏的完成标志会报错，避免悄悄混用结果。
+
+所有校验通过后，把旧 manifest、per_seed、summary 与配对表备份至
+resume_history/<UTC时间>/。没有 result.json 的未完成目录及其日志也会先移至备份，
+再重跑该项；完整运行原样保留。随后从完成结果重建 per_seed.csv，只启动缺少的
+任务，最终更新 summary.md/csv 和 paired_deltas.csv。若九次都完整，只重新汇总。
+本次异常中被截断的旧 per_seed.csv 不妨碍恢复。不要同时向同一输出目录启动多个进程。
+
+新增标准库回归测试覆盖异构字段保存、写入失败保护、完成结果复用及配置不匹配
+拒绝；本地未执行。可在服务器自行运行：
+
+```bash
+python -m unittest experiments.vlcs_calibration.test_results
+```
 
 ## 数据和源权重
 
