@@ -36,4 +36,59 @@
 默认 seed=110 是已有参考种子之一，不能自动称独立确认；另选种子也不等于新数据。
 不得根据这些结果再挑阈值后，把同一运行当作独立验证。
 
-实现和运行说明将在下一阶段提交。当前只有协议，尚无任何实验结果。
+## 服务器一行运行
+
+在仓库根目录和现有 PyTorch/CUDA 环境执行（单卡、一个 seed 的最小检查）：
+
+```bash
+python -u -m experiments.local_reliability.run --dataset-root datasets --gpu-idx 0 --seeds 110
+```
+
+不需要 reference-dir；默认加载现有 round1/PACS/Photo 源权重，缺失时直接报错，
+不会自动训练/下载。数据目录应包含 `datasets/PACS/`，自定义权重目录用
+`--checkpoint-dir '实际路径'`。输出默认新建到 `storage/local_reliability/<UTC时间>/`。
+现有目录绝不覆盖。多个 seed 用 `--seeds 110 123 456`，单 GPU 顺序独立进程；
+这些是已有开发种子，不自动构成独立确认。跨数据集可增加 `--dataset VLCS`，
+会自动切换到既有 Caltech101 源权重与流顺序。
+
+默认先做单 seed 的可行性检查；不得根据它的正负选择性决定报告哪些 seed。
+要确认假设，应在运行前约定完整 seed/数据集集合并保留全部结果。
+
+## 输出与判读
+
+每个 `seed_<n>/` 包含：
+
+| 文件 | 内容 |
+| --- | --- |
+| report.md | 两个问题的逐域表格和判读边界 |
+| local_neighbors.csv | 每张中心图的近邻错误率、匹配随机期望与超额错误率 |
+| local_summary.csv | 正确/错误中心分组汇总及有效样本数 |
+| identification.csv | all/covered、gate/entropy/random、top10%/20%检出指标 |
+| gate_groups.csv | 按独立图片统计的正确/错误伪标签平均权重 |
+| evidence.npz | 唯一样本ID、冻结特征、标签、熵、在线门控与覆盖状态 |
+| batches.csv | 每批查询、返回、评价样本及缓存数量 |
+| feedback.csv / calibration.csv | 有查询/返回事件时的反馈审计 |
+| collection.json / settings.json | 模型前后状态哈希、零更新计数、参数/权重哈希与版本 |
+
+先看 `local_summary.csv`：错误中心的超额近邻错误率是否高于正确中心，
+并核查每域实际错误数，避免类别/域基准差异或样本不足造成误读。
+再看 `identification.csv`：gate是否同时优于随机与熵，是否有足够覆盖，
+而非仅在极小 covered 子集中有效。无错误时 recall/lift/AUROC不可判定。
+随机基线是精确期望，不是一轮随机模拟；随机排序precision等于池内错误率，
+recall为实际选取数/N（ceil导致不一定恰好10%/20%）。
+
+离线重建单个运行的统计（只在服务器运行）：
+
+```bash
+python -m experiments.local_reliability.analyze --run-dir storage/local_reliability/<时间>/seed_110
+```
+
+局部统计分块计算，不构造全流 NxN 矩阵；单个类别内依然有二次距离计算。
+特征距离并列使用流顺序固定破同分，排名指标并列使用比例分配。
+数据和配置必须保持一致；checkpoint哈希和版本被记录，但没有全数据内容指纹。
+
+## 静态验证范围
+
+本地仅阅读代码、追踪调用链/标签释放时序/索引与数组形状/空组和并列边界，
+进行 Git 差异检查。没有执行 Python、编译检查、测试、分析、模型推理或实验。
+未生成结果；实际运行兼容性与数值正确性待服务器验证。

@@ -29,6 +29,8 @@ class FrozenProbe(FCRA):
         self.model.requires_grad_(False).eval()
         self.teacher.requires_grad_(False).eval()
         before = {"model": state_hash(self.model), "source": state_hash(self.teacher)}
+        if before["model"] != before["source"]:
+            raise RuntimeError("Frozen query and source models must start identically")
         arrays = {key: [] for key in (
             "sample_id", "step", "domain", "prediction", "truth", "entropy",
             "gate", "covered", "features")}
