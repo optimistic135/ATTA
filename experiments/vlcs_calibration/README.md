@@ -63,6 +63,45 @@ python -m unittest experiments.vlcs_calibration.test_results
 
 ## 数据和源权重
 
+### 从已有结果整理诊断文件（无需训练或推理）
+
+控制组/校准组正常完成时，原始文件在
+`<结果根目录>/<simatta_control或calibration_only>/seed_*/`，不是结果根目录。
+若找不到，可对现有目录离线整理：
+
+```bash
+python -m experiments.vlcs_calibration.recover_diagnostics \
+  --results-dir storage/vlcs_calibration/d0_seeds110_123_456
+```
+
+默认生成独立新目录 `diagnostics_recovery/<UTC时间>/`，不改源文件、不加载模型，
+也不重新训练或推理。可用 `--output-dir /path/to/new-export` 指定新位置。
+`--results-dir` 应指向完整实验根目录，或包含 per_seed.csv/日志的平铺导出目录。
+
+工具输出每组/seed 的 updates.csv、calibration.csv、replay.csv，以及 availability.csv
+和 report.md。必须结合 availability.csv 中的状态理解：
+
+- `copied_original`：找到原始文件，逐字节复制，附源路径和 SHA256。
+- `partial_derived`：仅由实际 budget.csv、batches.csv 或 updates.csv 恢复更新时钟、
+  更新次数、已返回记忆大小等可追溯字段，未保存的指标留空。
+- `unrecoverable`：仅生成表头占位，并非没有训练/反馈事件；report.md 解释缺少什么。
+
+不能从进度日志/均值反推真实的 gate_mean、监督/伪监督损失、梯度、教师预测、
+teacher correctness、need/relevance 或重放覆盖率；也不把学生预测冒充固定教师预测。
+只有 feedback.csv 时不能恢复完整 calibration.csv，因为查询台账没有教师预测/类别真值。
+若仅有目前提供的六份日志和 per_seed.csv，三个诊断表都会明确标为不可恢复。
+原始 SimATTA 没有 FCRA 校准/重放诊断，本工具只整理两个受控组。
+
+若存在 batches.csv，额外输出可由实际样本数和正确数计算的 domain_accuracy.csv。
+旧 resume_history 和已生成的恢复目录默认排除，避免混入不同版本/部分恢复文件；
+如要检查备份，应单独以那份备份实验根目录为输入。冲突的同名原始记录报错，不任意挑选。
+恢复导出不能用作实验续跑目录。若原记录确实不存在，机制指标只能在以后有记录的运行中获取。
+标准库回归用例已编写但未在本地执行：
+
+```bash
+python -m unittest experiments.vlcs_calibration.test_recover_diagnostics
+```
+
 需要 `datasets/VLCS/{C,L,S,V}/<类别>/<图像>`，或
 `datasets/VLCS/{Caltech101,LabelMe,SUN09,VOC2007}/<类别>/<图像>`。
 源域 Caltech101，目标流 LabelMe → SUN09 → VOC2007，batch=32，保留末批。
