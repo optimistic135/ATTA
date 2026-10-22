@@ -11,10 +11,11 @@ import sys
 from datetime import datetime, timezone
 
 from experiments.delayed_feedback.datasets import EXPERIMENTS, ROOT
-from experiments.delayed_feedback.run import dump_json, sha256, validate_inputs, write_csv
+from experiments.delayed_feedback.run import dump_json, sha256, validate_inputs
 from experiments.delayed_feedback.progress import ProgressDisplay, emit_progress, parse_progress
 from experiments.delayed_feedback.scheduler import run_jobs
 from .reference import NativeTrace
+from .results import load_completed, write_csv
 
 
 EXPERIMENT = EXPERIMENTS["VLCS"]
@@ -29,6 +30,8 @@ def parser():
     cli.add_argument("--dataset-root", type=Path, default=ROOT / "storage/datasets")
     cli.add_argument("--checkpoint-dir", type=Path, default=EXPERIMENT.checkpoint_dir)
     cli.add_argument("--output-dir", type=Path)
+    cli.add_argument("--resume", action="store_true",
+                     help="Reuse valid result.json files in an existing output directory")
     cli.add_argument("--seeds", type=int, nargs=3, default=[110, 123, 456])
     devices = cli.add_mutually_exclusive_group()
     devices.add_argument("--gpus", type=int, nargs="+")
@@ -168,6 +171,8 @@ def main():
         return
     if args.seed is not None or args.variant is not None:
         raise ValueError("seed/variant are worker-only")
+    if args.resume and (args.output_dir is None or not args.output_dir.is_dir()):
+        raise ValueError("--resume requires an existing --output-dir")
     if len(set(args.seeds)) != 3 or any(not 0 <= seed < 2**32 for seed in args.seeds):
         raise ValueError("Provide three distinct seeds in [0, 2**32)")
     gpus = args.gpus if args.gpus is not None else [args.gpu_idx if args.gpu_idx is not None else 0]
@@ -175,20 +180,74 @@ def main():
         raise ValueError("Choose distinct nonnegative GPUs")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     output = args.output_dir or ROOT / "storage/vlcs_calibration" / stamp
-    output.mkdir(parents=True, exist_ok=False)
+    checkpoint_hashes = {name: sha256(args.checkpoint_dir / name) for name in EXPERIMENT.checkpoint_names}
+    completed, previous = {}, None
+    if args.resume:
+        previous = json.loads((output / "manifest.json").read_text())
+        if (previous.get("method") != "VLCS-calibration" or previous.get("dataset") != "VLCS"
+                or previous.get("delay") != 0 or previous.get("batch_size") != 32
+                or previous.get("seeds") != args.seeds or tuple(previous.get("variants", ())) != VARIANTS
+                or previous.get("checkpoint_sha256") != checkpoint_hashes
+                or previous.get("num_workers") != args.num_workers
+                or Path(previous["dataset_root"]).resolve() != args.dataset_root):
+            raise ValueError("Existing experiment does not match this dataset/seed/weight/worker protocol")
+        # Preflight all completed runs before modifying anything. Ignore the
+        # possibly truncated per_seed.csv: result.json is the completion marker.
+        for seed in args.seeds:
+            folder = output / "simatta_original" / f"seed_{seed}"
+            native = load_completed(folder, "simatta_original", seed, previous)
+            trace = NativeTrace(folder, seed) if native is not None else None
+            if native is not None:
+                completed["simatta_original", seed] = native
+            for mode in VARIANTS[1:]:
+                result = load_completed(output / mode / f"seed_{seed}", mode, seed, previous, trace)
+                if result is not None:
+                    completed[mode, seed] = result
+        backup = output / "resume_history" / stamp
+        backup.mkdir(parents=True, exist_ok=False)
+        for name in ("manifest.json", "per_seed.csv", "summary.csv", "summary.md", "paired_deltas.csv"):
+            path = output / name
+            if path.is_file():
+                (backup / name).write_bytes(path.read_bytes())
+        for seed in args.seeds:
+            for mode in VARIANTS:
+                if (mode, seed) in completed:
+                    continue
+                folder = output / mode / f"seed_{seed}"
+                if folder.exists():
+                    target = backup / mode / folder.name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    folder.rename(target)
+                log = output / f"{mode}_seed_{seed}.log"
+                if log.is_file():
+                    log.rename(backup / log.name)
+    else:
+        output.mkdir(parents=True, exist_ok=False)
     manifest = {"method": "VLCS-calibration", "dataset": "VLCS", "delay": 0,
                 "status": "running", "seeds": args.seeds, "variants": VARIANTS, "batch_size": 32,
                 "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
-                "checkpoint_sha256": {name: sha256(args.checkpoint_dir / name) for name in EXPERIMENT.checkpoint_names},
+                "checkpoint_sha256": checkpoint_hashes,
                 "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                 "gpus": gpus, "num_workers": args.num_workers,
-                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}
+                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+                "resumed": args.resume, "reused_runs": len(completed), "completed_runs": len(completed),
+                "previous_git_commit": previous.get("git_commit") if previous else None,
+                "reused_result_sha256": {
+                    f"{mode}/seed_{seed}": sha256(output / mode / f"seed_{seed}" / "result.json")
+                    for mode, seed in completed}}
     dump_json(output / "manifest.json", manifest)
-    results = []
+    results = list(completed.values())
+    pending_seeds = [seed for seed in args.seeds if any((mode, seed) not in completed for mode in VARIANTS)]
+    pending_runs = 9 - len(completed)
+    print(f"Reusing {len(completed)} completed runs; scheduling {pending_runs} missing runs", flush=True)
+    if results:
+        write_csv(output / "per_seed.csv", results)
 
     def launch(seed, gpu):
         group = []
         for mode in VARIANTS:
+            if (mode, seed) in completed:
+                continue
             folder = output / mode / f"seed_{seed}"
             command = [sys.executable, "-m", "experiments.vlcs_calibration.run", "--worker",
                        "--variant", mode, "--seed", str(seed), "--gpu-idx", str(gpu),
@@ -216,11 +275,12 @@ def main():
 
     def save(group):
         results.extend(group)
+        results.sort(key=lambda row: (args.seeds.index(row["seed"]), VARIANTS.index(row["variant"])))
         write_csv(output / "per_seed.csv", results)
 
     try:
-        with ProgressDisplay(gpus, 9) as progress:
-            run_jobs(args.seeds, gpus, launch, save)
+        with ProgressDisplay(gpus, pending_runs) as progress:
+            run_jobs(pending_seeds, gpus, launch, save)
         summarize(results, output, args.seeds)
     except BaseException:
         manifest.update(status="failed", completed_runs=sum((output / mode / f"seed_{seed}" / "result.json").is_file()
