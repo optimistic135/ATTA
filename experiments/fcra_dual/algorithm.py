@@ -165,6 +165,7 @@ class DualFCRA(FCRA):
         size = self.config.train.train_bs
         for _ in range(quota):
             sampled = torch.multinomial(probabilities, size, replacement=True)
+            self._audit_supervised_draw(sampled)
             draws.index_add_(0, sampled, torch.ones(size))
             supervised_loss = F.cross_entropy(self.model(data[sampled].to(self.config.device)),
                                                labels[sampled].to(self.config.device))
@@ -174,8 +175,10 @@ class DualFCRA(FCRA):
                 pseudo_labels = reference.target[sampled_pseudo].to(self.config.device).long()
                 gates = self._feedback_gates(F.normalize(reference.feats[sampled_pseudo].to(
                     self.config.device), dim=1), pseudo_labels)
-                pseudo_loss = (gates * F.cross_entropy(self.model(reference.data[sampled_pseudo].to(
-                    self.config.device)), pseudo_labels, reduction="none")).mean()
+                pseudo_losses = F.cross_entropy(self.model(reference.data[sampled_pseudo].to(
+                    self.config.device)), pseudo_labels, reduction="none")
+                gates = self._audit_pseudo_draw(sampled_pseudo, gates, pseudo_losses)
+                pseudo_loss = (gates * pseudo_losses).mean()
                 loss = alpha * supervised_loss + (1 - alpha) * pseudo_loss
             else:
                 loss = supervised_loss
@@ -203,6 +206,17 @@ class DualFCRA(FCRA):
             "need_mean": float(need.mean()), "relevance_mean": float(relevance.mean()),
             "score_mean": float(score.mean()),
         })
+
+    def _audit_pseudo_draw(self, indices, gates, losses):
+        """Identity hook; diagnostic subclasses may log or intervene explicitly."""
+        return gates
+
+    def _audit_supervised_draw(self, indices):
+        return None
+
+    def _audit_observe_batch(self, step, domain, ids, truth):
+        """Evaluation-only hook. Production training must never consume truth here."""
+        return None
 
     def _strong_view(self, images):
         mean = images.new_tensor([0.485, 0.456, 0.406])[None, :, None, None]
@@ -289,6 +303,7 @@ class DualFCRA(FCRA):
                 slow, fast, mixed, gamma = self.last_prediction
                 truth = labels.cpu()
                 correct = int((probabilities.argmax(1).cpu() == truth).sum())
+                self._audit_observe_batch(step, domain, ids, truth)
                 correct_total += correct
                 sample_total += len(data)
                 if domain_step < 10:
