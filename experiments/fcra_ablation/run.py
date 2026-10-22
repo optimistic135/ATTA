@@ -50,7 +50,7 @@ def parser():
     return cli
 
 
-def worker(args):
+def worker(args, algorithm_factory=None, settings_extra=None):
     multiprocessing.set_start_method("spawn", force=True)
     import torch
     from ATTA import args_parser, config_summoner
@@ -89,8 +89,11 @@ def worker(args):
         raise ValueError("Configuration differs from the reference")
     reset_random_seed(config)
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    algorithm = (OriginalSimATTA(config) if args.variant == "simatta_original"
-                 else AblationFCRA(config, trace, args.variant))
+    if algorithm_factory is not None:
+        algorithm = algorithm_factory(config, trace)
+    else:
+        algorithm = (OriginalSimATTA(config) if args.variant == "simatta_original"
+                     else AblationFCRA(config, trace, args.variant))
     original = args.variant == "simatta_original"
     dump_json(args.output_dir / "settings.json", {
         "method": "FCRA-ablation", "dataset": "PACS",
@@ -108,6 +111,7 @@ def worker(args):
         "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
         "gpu": torch.cuda.get_device_name(args.gpu_idx),
         "num_workers": args.num_workers,
+        **(settings_extra or {}),
     })
     result = algorithm.run_stream(args.output_dir, progress=emit_progress)
     dump_json(args.output_dir / "result.json", result)
