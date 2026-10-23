@@ -43,7 +43,7 @@ def parser():
     return cli
 
 
-def worker(args):
+def worker(args, algorithm_factory=None, settings_extra=None, native_folder=None):
     multiprocessing.set_start_method("spawn", force=True)
     import torch
     from ATTA import args_parser, config_summoner
@@ -74,15 +74,17 @@ def worker(args):
         raise ValueError("Expected VLCS Caltech101 -> LabelMe -> SUN09 -> VOC2007, batch=32")
     native = args.variant == "simatta_original"
     trace = None
+    native_folder = native_folder or args.output_dir.parent.parent / "simatta_original" / f"seed_{args.seed}"
     if not native:
-        trace = NativeTrace(args.output_dir.parent.parent / "simatta_original" / f"seed_{args.seed}", args.seed)
+        trace = NativeTrace(native_folder, args.seed)
         if (dict(config.atta.SimATTA) != trace.settings["simatta"]
                 or config.train.train_bs != trace.settings["train_batch_size"]
                 or trace.settings["checkpoint_sha256"] != parent["checkpoint_sha256"]):
             raise ValueError("Controlled configuration differs from native run")
     reset_random_seed(config)
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    algorithm = NativeSimATTA(config) if native else ControlledCalibration(config, trace, args.variant)
+    algorithm = (algorithm_factory(config, trace) if algorithm_factory is not None else
+                 NativeSimATTA(config) if native else ControlledCalibration(config, trace, args.variant))
     dump_json(args.output_dir / "settings.json", {
         "method": "VLCS-calibration", "dataset": "VLCS", "variant": args.variant,
         "seed": args.seed, "delay": 0, "batch_size": 32, "train_batch_size": config.train.train_bs,
@@ -95,10 +97,11 @@ def worker(args):
         "fast_adapter_enabled": False, "num_workers": args.num_workers,
         "gpu_name": torch.cuda.get_device_name(args.gpu_idx),
         "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
+        **(settings_extra or {}),
     })
     result = algorithm.run_stream(args.output_dir, progress=emit_progress)
     if trace is not None:
-        current = NativeTrace(args.output_dir.parent.parent / "simatta_original" / f"seed_{args.seed}", args.seed)
+        current = NativeTrace(native_folder, args.seed)
         if trace.hashes != current.hashes:
             raise ValueError("Native reference changed during controlled run")
     dump_json(args.output_dir / "result.json", result)
