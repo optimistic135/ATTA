@@ -121,6 +121,14 @@ def summarize(output, results, existing, seeds):
         row = indexed["uniform_relaxation", seed]
         lines.append(f"| {seed} | {row['unmatched_updates']} | {row['mean_abs_matching_gap']:.8f} | "
                      f"{row['max_abs_matching_gap']:.8f} |")
+    lines += ["", "| New variant | Seed | Queries | Updates | Final mean gate | Conflict fraction |",
+              "| --- | ---: | ---: | ---: | ---: | ---: |"]
+    for mode in VARIANTS:
+        for seed in seeds:
+            row = indexed[mode, seed]
+            conflict = f"{row['conflict_fraction']:.6f}" if mode == "direction_check" else "n/a"
+            lines.append(f"| {mode} | {seed} | {row['queried']} | {row['slow_updates']} | "
+                         f"{row['final_gate_mean']:.6f} | {conflict} |")
     lines += ["", "Control matches the donor's per-update mean(1-g) whenever its own gate permits it.",
               "Saturated control steps are reported; do not claim exact strength matching when gaps remain.",
               "The control replays training statistics from a separate direction-check run, not hidden truth.",

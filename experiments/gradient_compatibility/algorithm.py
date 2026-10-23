@@ -93,10 +93,12 @@ class GradientCompatibility(ConfidenceMatch):
             raise ValueError("Donor and control pseudo-update schedules differ")
         write_csv(output_dir / "direction.csv", self.direction_rows)
         draw_count = sum(row["pseudo_draws"] for row in self.direction_rows)
+
         def weighted(key):
             return sum(row[key] * row["pseudo_draws"] for row in self.direction_rows) / draw_count
 
         result.update(method="VLCS-gradient-compatibility", variant=self.mode,
+                      pseudo_gate_updates=len(self.direction_rows),
                       final_gate_mean=weighted("final_gate_mean"),
                       removed_weight_mean=weighted("removed_weight_mean"),
                       mean_abs_matching_gap=sum(abs(row["matching_gap"]) * row["pseudo_draws"]
@@ -104,4 +106,7 @@ class GradientCompatibility(ConfidenceMatch):
                       max_abs_matching_gap=max(abs(row["matching_gap"]) for row in self.direction_rows),
                       unmatched_updates=sum(abs(row["matching_gap"]) > 1e-6 for row in self.direction_rows),
                       head_direction_updates=len(self.direction_rows) if self.mode == "direction_check" else 0)
+        if self.mode == "direction_check":
+            result.update(conflict_fraction=weighted("conflict_fraction"),
+                          invalid_direction_fraction=weighted("invalid_direction_fraction"))
         return result

@@ -39,3 +39,6 @@ summary.md 汇总唯一新变体与复用的旧结果，paired_deltas.csv 按 se
 
 本地仅静态分析与 Git 差异检查，不执行 Python、模型、测试或实验。
 实际实验须在服务器运行；失败保留日志，不重跑任何已有基线。
+
+下一步的更新方向检查及整体放松对照见 [gradient_compatibility](../gradient_compatibility/README.md)。
+该入口直接复用本实验的完整结果，不会重跑 confidence_match。

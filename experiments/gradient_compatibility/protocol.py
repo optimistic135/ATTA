@@ -52,6 +52,13 @@ def validate_variant(folder, mode, seed, reference, trace, entropy_gap, method=M
             raise ValueError(f"Completed run used a different donor: {folder}")
     if any(not (folder / name).is_file() for name in required):
         raise ValueError(f"Completed run lacks diagnostic files: {folder}")
+    if method == METHOD:
+        schedule = load_donor(folder / "direction.csv", trace)
+        with (folder / "updates.csv").open(newline="", encoding="utf-8") as stream:
+            expected = {(int(row["step"]), int(row["iteration"])) for row in csv.DictReader(stream)
+                        if row.get("pseudo_loss", "") != ""}
+        if set(schedule) != expected or result.get("pseudo_gate_updates") != len(schedule):
+            raise ValueError(f"Incomplete pseudo-gate diagnostics: {folder}")
     return result
 
 
