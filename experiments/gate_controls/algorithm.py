@@ -4,8 +4,6 @@ import hashlib
 from collections import defaultdict
 
 import torch
-from torch.nn import functional as F
-
 from experiments.fcra.algorithm import DEFAULTS
 from experiments.fcra_ablation.algorithm import AblationFCRA
 from experiments.vlcs_calibration.results import write_csv
