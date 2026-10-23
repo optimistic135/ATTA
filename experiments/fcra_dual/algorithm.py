@@ -167,16 +167,17 @@ class DualFCRA(FCRA):
             sampled = torch.multinomial(probabilities, size, replacement=True)
             self._audit_supervised_draw(sampled)
             draws.index_add_(0, sampled, torch.ones(size))
-            supervised_loss = F.cross_entropy(self.model(data[sampled].to(self.config.device)),
-                                               labels[sampled].to(self.config.device))
+            supervised_labels = labels[sampled].to(self.config.device)
+            supervised_loss = F.cross_entropy(self._slow_forward(
+                data[sampled].to(self.config.device), supervised_labels, "supervised"), supervised_labels)
             pseudo_loss, gates = None, None
             if pseudo_count:
                 sampled_pseudo = torch.randint(0, pseudo_count, (size,))
                 pseudo_labels = reference.target[sampled_pseudo].to(self.config.device).long()
                 gates = self._feedback_gates(F.normalize(reference.feats[sampled_pseudo].to(
                     self.config.device), dim=1), pseudo_labels)
-                pseudo_losses = F.cross_entropy(self.model(reference.data[sampled_pseudo].to(
-                    self.config.device)), pseudo_labels, reduction="none")
+                pseudo_losses = F.cross_entropy(self._slow_forward(reference.data[sampled_pseudo].to(
+                    self.config.device), pseudo_labels, "pseudo"), pseudo_labels, reduction="none")
                 gates = self._audit_pseudo_draw(sampled_pseudo, gates, pseudo_losses)
                 pseudo_loss = (gates * pseudo_losses).mean()
                 loss = alpha * supervised_loss + (1 - alpha) * pseudo_loss
@@ -206,6 +207,10 @@ class DualFCRA(FCRA):
             "need_mean": float(need.mean()), "relevance_mean": float(relevance.mean()),
             "score_mean": float(score.mean()),
         })
+
+    def _slow_forward(self, images, labels, kind):
+        """Default training forward; subclasses may observe this exact forward."""
+        return self.model(images)
 
     def _audit_pseudo_draw(self, indices, gates, losses):
         """Identity hook; diagnostic subclasses may log or intervene explicitly."""
