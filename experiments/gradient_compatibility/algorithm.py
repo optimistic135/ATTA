@@ -93,7 +93,9 @@ class GradientCompatibility(ConfidenceMatch):
             raise ValueError("Donor and control pseudo-update schedules differ")
         write_csv(output_dir / "direction.csv", self.direction_rows)
         draw_count = sum(row["pseudo_draws"] for row in self.direction_rows)
-        weighted = lambda key: sum(row[key] * row["pseudo_draws"] for row in self.direction_rows) / draw_count
+        def weighted(key):
+            return sum(row[key] * row["pseudo_draws"] for row in self.direction_rows) / draw_count
+
         result.update(method="VLCS-gradient-compatibility", variant=self.mode,
                       final_gate_mean=weighted("final_gate_mean"),
                       removed_weight_mean=weighted("removed_weight_mean"),
