@@ -28,7 +28,9 @@ class TransportPolicy:
 
     def choose(self, context, step):
         if not self.events:
-            return 0, {"support": 0.0, "score": 0.0, "reward": 0.0}
+            return 0, {"support": 0.0, "score": 0.0, "reward": 0.0,
+                       "action_rewards": [0.0] * len(ACTIONS),
+                       "action_scores": [0.0] * len(ACTIONS)}
         weights, same, rewards = [], [], []
         for old, reward in self.events:
             delta = sum((context[key] - old[key]) ** 2
@@ -57,4 +59,5 @@ class TransportPolicy:
                 or scores[action] <= DEFAULTS["margin"]):
             action = 0
         return action, {"support": support, "score": float(scores[action]),
-                        "reward": float(mean[action])}
+                        "reward": float(mean[action]), "action_rewards": mean.tolist(),
+                        "action_scores": scores.tolist()}

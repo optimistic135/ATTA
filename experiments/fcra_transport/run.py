@@ -47,7 +47,7 @@ def run_worker(args):
     from ATTA import args_parser, config_summoner
     from ATTA.utils.initial import reset_random_seed
     from .algorithm import CalibratedTransport
-    from .policy import DEFAULTS
+    from .policy import ACTIONS, DEFAULTS
     from .stream import run_stream
 
     if (args.delay is None or args.seed is None or args.output_dir is None
@@ -72,7 +72,7 @@ def run_worker(args):
     if (config.dataset.name != "PACS"
             or tuple(config.dataset.test_envs) != EXPERIMENT.environments
             or config.atta.batch_size != BATCH_SIZE):
-        raise ValueError("FCRA requires PACS Photo -> Art -> Cartoon -> Sketch, batch size 32")
+        raise ValueError("Transport requires the PACS Photo-source configuration and batch size 32")
     reset_random_seed(config)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     dump_json(args.output_dir / "settings.json", {
@@ -80,7 +80,8 @@ def run_worker(args):
         "batch_size": BATCH_SIZE, "train_batch_size": config.train.train_bs,
         "source": EXPERIMENT.source, "target_order": [name for name, _ in STAGES],
         "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
-        "transport": DEFAULTS, "simatta": dict(config.atta.SimATTA),
+        "transport": DEFAULTS, "actions": ACTIONS,
+        "simatta": dict(config.atta.SimATTA),
         "gpu_clustering": config.atta.gpu_clustering,
         "clustering": "GPU KMeans" if config.atta.gpu_clustering else "sklearn CPU KMeans",
         "num_workers": config.num_workers, "device": str(config.device),

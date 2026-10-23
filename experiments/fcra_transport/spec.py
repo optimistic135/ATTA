@@ -1,3 +1,5 @@
+"""Standard-library-only experiment identity and summary schema."""
+
 STAGES = (("Art_1", 0), ("Cartoon", 1), ("Sketch", 3), ("Art_2", 0), ("Photo", 2))
 METRICS = tuple(f"{name}_accuracy_pct" for name, _ in STAGES) + (
     "Art_accuracy_pct", "stream_accuracy_pct", "stage_macro_accuracy_pct",

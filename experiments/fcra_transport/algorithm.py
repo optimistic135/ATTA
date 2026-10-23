@@ -2,6 +2,7 @@
 
 from collections import deque
 import copy
+import json
 import random
 
 import numpy as np
@@ -25,13 +26,17 @@ class CalibratedTransport(FCRA):
         self.policy = TransportPolicy()
         self.styles = deque(maxlen=DEFAULTS["window_samples"])
         self.pending_audits = {}
+        self.memory_cache = None
         self.audit_predictions, self.reward_rows, self.decision_rows = [], [], []
         self.budget_rows = []
         self.generator = torch.Generator().manual_seed(config.random_seed + 17)
         self.audit_generator = torch.Generator().manual_seed(config.random_seed + 71)
         self.main_updates = self.audit_updates = 0
         self.transport_updates = 0
-        self.compute = {}
+        self.compute = {f"{name}_encoder_{operation}_{unit}": 0
+                        for name in ("main", "source", "ema", "audit")
+                        for operation in ("forward", "backward")
+                        for unit in ("calls", "images")}
         # Hooks on the complete encoder include inherited selection, replay
         # scoring and anchor refresh calls. Audit copies get separate hooks.
         self._install_counters(self.model, "main")
@@ -67,7 +72,7 @@ class CalibratedTransport(FCRA):
         else:
             self.stream_step += 1
             self.query_rows.append({
-                "step": self.stream_step, "pending_before_release": len(self.oracle._pending),
+                "step": self.stream_step, "pending_before_release": self.oracle.counts()["pending"],
                 "eligible_before": 0, "eligible_after": 0, "suppressed": 0,
                 "new_queries": 0, "mean_redundancy": 0.0,
             })
@@ -79,6 +84,7 @@ class CalibratedTransport(FCRA):
         probabilities, mean, logstd = describe(self.ema, data)
         # Flip is deterministic and consumes no training random-number stream.
         flipped = self.ema(data.flip(-1)).softmax(1)
+        self.teacher.eval()
         source = F.normalize(self.teacher[0](data), dim=1)
         confidence, predicted = probabilities.max(1)
         consistent = predicted == flipped.argmax(1)
@@ -110,7 +116,11 @@ class CalibratedTransport(FCRA):
 
     @torch.no_grad()
     def _prepare(self, generator, forced=None):
-        indices, data, labels = self._supervised_memory()
+        # Returned labels are append-only; avoid copying the entire image memory
+        # on every optimizer step. A release invalidates the cached length.
+        if self.memory_cache is None or len(self.memory_cache[0]) != len(self.received):
+            self.memory_cache = self._supervised_memory() if self.received else ([], None, None)
+        indices, data, labels = self.memory_cache
         if not indices:
             return None
         donors = [item for item in self.styles if item["trusted"]]
@@ -122,8 +132,8 @@ class CalibratedTransport(FCRA):
             if not len(eligible):
                 return None
             positions = torch.stack([self.teacher_features[indices[int(j)]] for j in eligible])
-            best = eligible[(positions @ forced["semantic"]).argmax()]
-            sampled[:] = best
+            nearest = eligible[(positions @ forced["semantic"]).topk(min(4, len(eligible))).indices]
+            sampled = nearest[torch.randint(len(nearest), (size,), generator=generator)]
         elif donors:
             for k in range(size // 4):
                 donor = donors[int(torch.randint(len(donors), (1,), generator=generator))]
@@ -141,7 +151,8 @@ class CalibratedTransport(FCRA):
             if pool:
                 semantic = self.teacher_features[indices[j]]
                 donor = max(pool, key=lambda item: float(item["semantic"] @ semantic))
-                context = self._context(donor, old_mean[k].cpu(), old_logstd[k].cpu(), len(pool))
+                support = sum(item["class"] == donor["class"] for item in donors)
+                context = self._context(donor, old_mean[k].cpu(), old_logstd[k].cpu(), support)
                 means.append(donor["mean"])
                 logstds.append(donor["logstd"])
                 matched.append(True)
@@ -218,12 +229,15 @@ class CalibratedTransport(FCRA):
         try:
             with torch.random.fork_rng(devices=devices):
                 base_cpu = torch.get_rng_state()
-                base_cuda = torch.cuda.get_rng_state_all() if devices else None
+                base_cuda = torch.cuda.get_rng_state() if devices else None
                 for index in list(new_indices)[:DEFAULTS["audit_samples"]]:
                     sid = int(self.query_anchors.target[index])
-                    donor = lookup[sid]
-                    if not donor["trusted"]:
+                    query = lookup[sid]
+                    pool = [item for item in self.styles
+                            if item["trusted"] and item["class"] == query["class"]]
+                    if not pool:
                         continue
+                    donor = max(pool, key=lambda item: float(item["semantic"] @ query["semantic"]))
                     packs = [self._prepare(self.audit_generator, forced=donor)
                              for _ in range(DEFAULTS["audit_steps"])]
                     if any(pack is None for pack in packs):
@@ -231,7 +245,11 @@ class CalibratedTransport(FCRA):
                     cost = len(ACTIONS) * len(packs)
                     if used + cost > DEFAULTS["steps_per_batch"]:
                         break
-                    context = packs[0]["contexts"][0]
+                    context = dict(packs[0]["contexts"][0])
+                    # The candidate update uses a minibatch of history images;
+                    # describe the whole intervention instead of its first draw.
+                    for key in ("distance", "reliability", "uncertainty"):
+                        context[key] = float(np.mean([entry[key] for entry in packs[0]["contexts"]]))
                     chosen, estimate = self.policy.choose(context, step)
                     predictions = []
                     for action in range(len(ACTIONS)):
@@ -239,7 +257,7 @@ class CalibratedTransport(FCRA):
                         np.random.set_state(numpy_state)
                         torch.set_rng_state(base_cpu)
                         if devices:
-                            torch.cuda.set_rng_state_all(base_cuda)
+                            torch.cuda.set_rng_state(base_cuda)
                         branch = copy.deepcopy(self.model)
                         # Remove copied encoder counters, then count audit work.
                         branch[0]._forward_hooks.clear()
@@ -258,8 +276,10 @@ class CalibratedTransport(FCRA):
                         self.audit_predictions.append({
                             "step": step, "anchor_index": index, "sample_id": sid,
                             "action": action, "beta": ACTIONS[action],
-                            "context": __import__("json").dumps(context, sort_keys=True),
-                            "probabilities": __import__("json").dumps(probability.tolist()),
+                            "context": json.dumps(context, sort_keys=True),
+                            "probabilities": json.dumps(probability.tolist()),
+                            "candidate_predicted_reward": estimate["action_rewards"][action],
+                            "candidate_score": estimate["action_scores"][action],
                             "chosen_before_reward": chosen, **estimate,
                         })
                         del optimizer, branch
@@ -285,7 +305,9 @@ class CalibratedTransport(FCRA):
                     "anchor_index": index, "label": int(label),
                     "predicted_class_at_audit": context["class"],
                     "action": action, "beta": ACTIONS[action], "reward": float(rewards[action]),
-                    "chosen_before_reward": chosen, "predicted_reward": estimate["reward"],
+                    "chosen_before_reward": chosen,
+                    "predicted_reward": estimate["action_rewards"][action],
+                    "predicted_score": estimate["action_scores"][action],
                     "predicted_support": estimate["support"],
                 })
             self.policy.add(context, rewards.numpy())
@@ -297,10 +319,12 @@ class CalibratedTransport(FCRA):
         if self.received:
             for iteration in range(quota - audit_cost):
                 pack = self._prepare(self.generator)
-                actions = []
+                actions, supports, scores = [], [], []
                 for context, matched in zip(pack["contexts"], pack["matched"]):
                     action, estimate = self.policy.choose(context, self.stream_step)
                     actions.append(action if matched else 0)
+                    supports.append(estimate["support"])
+                    scores.append(estimate["score"])
                 loss = self._update(self.model, self.optimizer, pack, actions)
                 transported = sum(action != 0 for action in actions)
                 self.transport_updates += int(transported > 0)
@@ -312,6 +336,8 @@ class CalibratedTransport(FCRA):
                     "alpha": pack["alpha"], "matched": sum(pack["matched"]),
                     "original": actions.count(0), "small": actions.count(1),
                     "medium": actions.count(2), "evidence": len(self.policy.events),
+                    "support_mean": float(np.mean(supports)),
+                    "selected_score_mean": float(np.mean(scores)),
                     "returned_memory": len(self.received),
                 })
         if used + audit_cost > quota:
