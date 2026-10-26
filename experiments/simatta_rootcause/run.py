@@ -33,7 +33,7 @@ def parser():
     cli.add_argument("--output-dir", type=Path,
                      help="New results directory; existing results are never overwritten")
     cli.add_argument("--seeds", type=int, nargs=3, default=[110, 123, 456],
-                     help="Three distinct seeds shared by all delays (default: 110 123 456)")
+                     help="Three distinct D=100 seeds (default: 110 123 456)")
     devices = cli.add_mutually_exclusive_group()
     devices.add_argument("--gpu-idx", type=int, help="One GPU (default: 0)")
     devices.add_argument("--gpus", type=int, nargs="+", help="One worker per GPU, e.g. 0 1")
@@ -50,7 +50,6 @@ def run_worker(args):
     from ATTA import args_parser, config_summoner
     from ATTA.utils.initial import reset_random_seed
     from .algorithm import RootCauseSimATTA
-    from .stream import run_stream
 
     if (args.delay is None or args.seed is None or args.output_dir is None
             or args.gpu_idx is None or args.gpu_idx < 0 or args.gpus is not None):
@@ -91,7 +90,7 @@ def run_worker(args):
         "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
     })
     algorithm = RootCauseSimATTA(config)
-    result = run_stream(algorithm, args.output_dir, emit_progress)
+    result = algorithm.run_stream(args.output_dir, progress=emit_progress)
     dump_json(args.output_dir / "result.json", result)
 
 

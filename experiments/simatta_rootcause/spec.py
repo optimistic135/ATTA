@@ -3,7 +3,7 @@
 METHOD = "SimATTA-D100-diagnosis"
 ARMS = ("SKIP", "TRUE", "PSEUDO", "MIX")
 DEFAULTS = {
-    "delay": 100, "batch_size": 32, "probe_starts": (100, 130, 160, 190, 220),
+    "delay": 100, "batch_size": 32, "probe_starts": (100, 130, 170, 210, 240),
     "trigger_window": 10, "branch_steps": 10, "future_batches": 10,
     "truth_pool": "complete returned-label memory including this release",
     "pseudo_pool": "original frozen-teacher low-entropy pseudo-label memory",

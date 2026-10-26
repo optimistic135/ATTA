@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 import copy
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -27,6 +28,14 @@ def restore_random(state):
         torch.cuda.set_rng_state(state[1])
     np.random.set_state(state[2])
     random.setstate(state[3])
+
+
+def fingerprint(model):
+    digest = hashlib.sha256()
+    for name, value in model.state_dict().items():
+        digest.update(name.encode("utf-8"))
+        digest.update(value.detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()
 
 
 @contextmanager
@@ -98,6 +107,8 @@ class RootCauseSimATTA(DelayedSimATTA):
             if a is not None and b is not None:
                 dot += (a * b).sum()
         norm_t, norm_p = float(norm_t.sqrt()), float(norm_p.sqrt())
+        if not all(math.isfinite(value) for value in (norm_t, norm_p, float(dot))):
+            raise FloatingPointError("Non-finite probe gradient diagnostics")
         cosine = float(dot) / (norm_t * norm_p) if norm_t * norm_p > 1e-12 else None
         ratio = (1 - alpha) * norm_p / (alpha * norm_t) if alpha * norm_t > 1e-12 else None
         result = {"gradient_cosine": cosine, "true_gradient_norm": norm_t,
@@ -145,6 +156,7 @@ class RootCauseSimATTA(DelayedSimATTA):
                                    "truth_anchor_indices": json.dumps(chosen),
                                    "pseudo_pool_indices": json.dumps(pseudo.tolist())})
         snapshot = copy.deepcopy(self.model).cpu()
+        initial_hash = fingerprint(snapshot)
         models = {"SKIP": snapshot}
         gradient = self._gradients(snapshot, pool, draws[0], alpha)
         snapshot.to(self.config.device)
@@ -171,15 +183,21 @@ class RootCauseSimATTA(DelayedSimATTA):
                                             "pseudo_loss": float(pseudo.detach()) if pseudo is not None else None,
                                             "objective_loss": float(loss.detach())})
             history_after[arm] = self._accuracy(branch, pool["truth_images"], pool["truth_labels"])
+            optimizer.zero_grad(set_to_none=True)
             models[arm] = branch.cpu()
             del optimizer, true, pseudo, loss
         same_domain = sum(self.oracle.records[index].query_domain == domain for index in ready)
+        fresh_same = sum(self.oracle.records[index].query_domain == domain for index, _ in released)
+        if fingerprint(self.model) != initial_hash:
+            raise AssertionError("Diagnosis altered the factual model parameters or buffers")
         self.active.append({"id": start, "step": step, "domain": domain,
                             "models": models, "alpha": alpha, "truth_count": len(ready),
                             "fresh_count": len(released), "fresh_draws": fresh_draws,
                             "pseudo_count": reference.num_elem(), "history_before": history_before,
                             "history_after": history_after, "gradient": gradient,
                             "truth_same_domain_pct": 100 * same_domain / len(ready),
+                            "fresh_same_domain_pct": 100 * fresh_same / len(released),
+                            "initial_state_sha256": initial_hash,
                             "batches": 0, "samples": 0,
                             "correct": {arm: 0 for arm in ARMS},
                             "fixed": {arm: 0 for arm in ARMS}, "broken": {arm: 0 for arm in ARMS}})
@@ -235,6 +253,8 @@ class RootCauseSimATTA(DelayedSimATTA):
                 "alpha": probe["alpha"], "truth_count": probe["truth_count"],
                 "fresh_count": probe["fresh_count"], "fresh_draws": probe["fresh_draws"],
                 "pseudo_count": probe["pseudo_count"], "truth_same_domain_pct": probe["truth_same_domain_pct"],
+                "fresh_same_domain_pct": probe["fresh_same_domain_pct"],
+                "initial_state_sha256": probe["initial_state_sha256"],
                 **probe["gradient"],
             })
         if complete:
@@ -256,9 +276,10 @@ class RootCauseSimATTA(DelayedSimATTA):
         skipped = [{"probe_id": start, "reason": "no new return with nonempty pseudo pool in trigger window"}
                    for start in D["probe_starts"] if start not in self.triggered]
         save_rows(output / "skipped_probes.csv", skipped, ["probe_id", "reason"])
-        result = {"method": METHOD, **baseline, "main_updates": self.main_updates,
+        result = {**baseline, "method": METHOD, "main_updates": self.main_updates,
                   "returned_pct": 100 * baseline["returned"] / baseline["queried"] if baseline["queried"] else None,
-                  "complete_probes": len(self.completed), "triggered_probes": len(self.triggered)}
+                  "complete_probes": len(self.completed), "triggered_probes": len(self.triggered),
+                  "probe_optimizer_updates": len(self.train_rows)}
         for before, key in ((True, "before_feedback_accuracy_pct"), (False, "after_feedback_accuracy_pct")):
             group = [row for row in self.phase_rows if row["before_feedback"] == before]
             total = sum(row["samples"] for row in group)
