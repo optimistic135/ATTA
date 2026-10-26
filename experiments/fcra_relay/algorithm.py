@@ -2,6 +2,7 @@
 
 from collections import deque
 import copy
+import json
 
 import torch
 from torch.nn import functional as F
@@ -34,10 +35,10 @@ class FCRARelay(FCRA):
         self.query_contexts = {}
         self.current_description = None
         self.memory_cache = None
-        self.last_fresh = []
         self.main_updates = self.current_updates = self.supervised_updates = 0
         self.relay_used_samples = self.relay_overrides = 0
         self.train_rows, self.relay_rows, self.budget_rows = [], [], []
+        self.query_predictions = []
         self.compute = {f"{name}_encoder_{operation}_{unit}": 0
                         for name in ("main", "source", "ema")
                         for operation in ("forward", "backward") for unit in ("calls", "images")}
@@ -82,12 +83,21 @@ class FCRARelay(FCRA):
         for index in range(previous, current):
             pos = positions[int(self.query_anchors.target[index])]
             self.query_contexts[index] = (
-                semantic[pos].cpu(), int(relayed["vote"][pos].argmax()), bool(relayed["valid"][pos]),
+                semantic[pos].cpu(), int(relayed["vote"][pos].argmax()), bool(relayed["eligible"][pos]),
                 raw[pos].cpu(), result[pos].cpu(), self.stream_step)
+            self.query_predictions.append({
+                "step": self.stream_step, "anchor_index": index,
+                "sample_id": int(self.query_anchors.target[index]),
+                "eligible": bool(relayed["eligible"][pos]), "adopted": bool(relayed["valid"][pos]),
+                "raw_probabilities": json.dumps(raw[pos].cpu().tolist()),
+                "vote_probabilities": json.dumps(relayed["vote"][pos].cpu().tolist()),
+                "output_probabilities": json.dumps(result[pos].cpu().tolist()),
+            })
         self.current_description = {"semantic": semantic.cpu(), "raw": raw.cpu(),
                                     "relayed": result.cpu(), "valid": relayed["valid"].cpu()}
         self.relay_rows.append({"step": self.stream_step, "samples": len(data),
                                 "relay_supported": int(relayed["valid"].sum()),
+                                "relay_eligible": int(relayed["eligible"].sum()),
                                 "relay_changed_predictions": int((raw.argmax(1) != result.argmax(1)).sum()),
                                 "mean_trust": float(relayed["trust"].mean()),
                                 "mean_mix": float(relayed["mix"].mean()),
@@ -103,7 +113,6 @@ class FCRARelay(FCRA):
             context = self.query_contexts.pop(index, None)
             if context is not None:
                 self.relay.calibrate(context, label, step, index)
-        self.last_fresh = [index for index, _ in released]
 
     @torch.no_grad()
     def _sync_memory(self):
@@ -144,8 +153,7 @@ class FCRARelay(FCRA):
         # cached as permanent truth; relay targets are recomputed after release.
         latest_data, latest_semantic = self.buffer[-1]
         latest = self._sample(len(latest_data), (size + 1) // 2)
-        all_data = torch.cat([entry[0] for entry in self.buffer])
-        all_semantic = torch.cat([entry[1] for entry in self.buffer])
+        all_data, all_semantic = self.buffer_data, self.buffer_semantic
         recent = self._sample(len(all_data), size // 2)
         images = torch.cat((latest_data[latest], all_data[recent])).to(self.config.device)
         semantic = torch.cat((latest_semantic[latest], all_semantic[recent])).to(self.config.device)
@@ -207,7 +215,7 @@ class FCRARelay(FCRA):
             raise FloatingPointError("Non-finite FCRA-Relay loss")
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        norm = torch.nn.utils.clip_grad_norm_(self.trainable, DEFAULTS["gradient_clip"])
+        norm = torch.nn.utils.clip_grad_norm_(self.trainable, DEFAULTS["gradient_clip"], error_if_nonfinite=True)
         self.optimizer.step()
         self._ema_update()
         self.main_updates += 1
@@ -229,6 +237,8 @@ class FCRARelay(FCRA):
             raise ValueError("FCRA-Relay has no candidate audit updates")
         self._sync_memory()
         self.buffer.append((self.current_data.detach().cpu(), self.current_description["semantic"]))
+        self.buffer_data = torch.cat([entry[0] for entry in self.buffer])
+        self.buffer_semantic = torch.cat([entry[1] for entry in self.buffer])
         before = self.main_updates
         for _ in range(DEFAULTS["current_steps"]):
             self._step(with_current=True)

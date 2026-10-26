@@ -3,8 +3,6 @@
 from collections import deque
 
 import torch
-from torch.nn import functional as F
-
 from .spec import DEFAULTS
 
 
@@ -40,6 +38,7 @@ class SemanticRelay:
         count = len(features)
         fallback = {"vote": base.detach(), "target": base.detach(),
                     "valid": torch.zeros(count, device=features.device, dtype=torch.bool),
+                    "eligible": torch.zeros(count, device=features.device, dtype=torch.bool),
                     "trust": base.new_zeros(count), "mix": base.new_zeros(count),
                     "support": base.new_zeros(count), "max_similarity": base.new_zeros(count)}
         if self.features is None or len(self.features) == 0:
@@ -79,9 +78,11 @@ class SemanticRelay:
                       + evidence.sum(1)))
         # No agreement condition with the model's predicted class: feedback can
         # replace an incorrect, high-confidence EMA pseudo label.
-        valid = valid & (trust >= 0.5)
+        eligible_vote = valid
+        valid = eligible_vote & (trust >= 0.5)
         mix = DEFAULTS["prediction_mix_cap"] * trust * valid
         prediction = (1 - mix[:, None]) * base + mix[:, None] * vote
         return {"vote": vote, "target": prediction, "valid": valid,
+                "eligible": eligible_vote,
                 "trust": trust, "mix": mix, "support": support,
                 "max_similarity": values[:, 0]}

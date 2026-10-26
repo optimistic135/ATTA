@@ -203,6 +203,7 @@ def run_stream(algorithm, output, progress):
         ("domains.csv", domains, ["domain", "accuracy_pct"]),
         ("feedback.csv", feedback, ["sample_id", "query_stage", "return_stage", "cross_domain", "cross_stage"]),
         ("queries.csv", algorithm.query_rows, ["step", "new_queries"]),
+        ("query_predictions.csv", algorithm.query_predictions, ["step", "anchor_index", "sample_id", "eligible"]),
         ("relay.csv", algorithm.relay_rows, ["step", "relay_supported", "mean_trust"]),
         ("calibration.csv", algorithm.relay.rows, ["anchor_index", "query_step", "return_step", "correct"]),
         ("updates.csv", algorithm.train_rows, ["step", "with_current", "has_truth", "loss"]),

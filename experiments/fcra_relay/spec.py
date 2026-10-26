@@ -18,7 +18,7 @@ DEFAULTS = {
 }
 METRICS = tuple(f"{stage}_accuracy_pct" for stage, _ in STAGES) + (
     "Art_accuracy_pct", "first_three_macro_accuracy_pct", "first_three_stream_accuracy_pct",
-    "stream_accuracy_pct", "domain_macro_accuracy_pct", "stage_macro_accuracy_pct",
+    "stream_accuracy_pct", "raw_stream_accuracy_pct", "domain_macro_accuracy_pct", "stage_macro_accuracy_pct",
     "before_feedback_accuracy_pct", "after_feedback_accuracy_pct",
     "queried", "returned", "returned_pct", "pending", "pending_pct",
     "cross_domain_returned", "cross_domain_pct", "cross_stage_returned", "cross_stage_pct",
