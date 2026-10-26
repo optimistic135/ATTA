@@ -12,4 +12,5 @@ METRICS = ("Art_accuracy_pct", "Cartoon_accuracy_pct", "Sketch_accuracy_pct",
            "domain_macro_accuracy_pct", "stream_accuracy_pct", "queried", "returned", "returned_pct",
            "cross_domain_returned", "cross_domain_pct", "pending", "main_updates", "candidate_updates",
            "gate_evaluations", "gate_acceptances", "gate_acceptance_pct", "aux_update_pct",
-           "truth_coefficient_mean", "pseudo_coefficient_mean", "stream_seconds", "peak_cuda_memory_mb")
+           "truth_coefficient_mean", "pseudo_coefficient_mean", "local_aux_minus_true_pp",
+           "accepted_local_aux_minus_true_pp", "stream_seconds", "peak_cuda_memory_mb")

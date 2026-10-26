@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 import time
 
@@ -13,15 +14,19 @@ from experiments.delayed_feedback.simatta import DelayedSimATTA
 from experiments.fcra_relay.stream import save_rows
 from experiments.simatta_rootcause.algorithm import isolated_randomness, restore_random, fingerprint
 from experiments.simatta_rootcause.spec import DEFAULTS as PROBE
-from .spec import DEFAULTS as D
+from .spec import DEFAULTS as D, GROUPS
 
 
 class SPATTA(DelayedSimATTA):
     def __init__(self, config, group, trace):
         super().__init__(config, D["delay"])
+        if group not in GROUPS:
+            raise ValueError("Unknown controlled-study objective")
         self.group, self.trace = group, trace
-        if dict(config.atta.SimATTA) != trace.simatta:
+        if dict(config.atta.SimATTA) != trace.simatta or config.train.train_bs != trace.train_batch_size:
             raise ValueError("SimATTA configuration differs from reference")
+        if config.model.dropout_rate != 0 or not config.model.freeze_bn:
+            raise ValueError("Paired PACS study requires the reference dropout=0 and freeze_bn=True")
         structure = [(self.experiment.domains[env], min(32, len(loader.sampler) - start))
                      for env in config.dataset.test_envs[1:] for loader in [self.fast_loader[env]]
                      for start in range(0, len(loader.sampler), 32)]
@@ -36,6 +41,7 @@ class SPATTA(DelayedSimATTA):
         self.gate_rows, self.update_rows, self.budget_rows, self.local_rows = [], [], [], []
         self.active, self.monitored = [], set()
         self.formal_hash, self.pseudo_hash = hashlib.sha256(), hashlib.sha256()
+        self.formal_by_step = [0] * trace.steps
         self.compute = {f"{name}_{direction}_{unit}": 0 for name in ("main", "teacher", "candidate")
                         for direction in ("forward", "backward") for unit in ("calls", "images")}
         self._counter(self.model, "main")
@@ -165,6 +171,8 @@ class SPATTA(DelayedSimATTA):
             candidates[name] = branch.cpu()
             del optimizer, loss
         gain = losses["TRUE"] - losses["AUX"]
+        if not math.isfinite(gain):
+            raise FloatingPointError("Non-finite fresh-feedback validation gain")
         for start in PROBE["probe_starts"]:
             if start not in self.monitored and start <= step < start + PROBE["trigger_window"]:
                 self.monitored.add(start)
@@ -194,6 +202,7 @@ class SPATTA(DelayedSimATTA):
         generator = torch.Generator().manual_seed(self.config.random_seed + 1000003 * self.step + 29)
         optimizer = torch.optim.SGD(self.model.parameters(), lr=self.config.atta.SimATTA.lr, momentum=0.9)
         truth_data = self.query_anchors.data[ready]
+        ready_tensor = torch.tensor(ready)
         truth_labels = torch.tensor([self.received[index] for index in ready], dtype=torch.long)
         self.model.train()
         for iteration in range(quota):
@@ -201,7 +210,7 @@ class SPATTA(DelayedSimATTA):
             ppos = (torch.randint(count_p, (self.config.train.train_bs,), generator=generator)
                     if count_p else torch.empty(0, dtype=torch.long))
             self.formal_hash.update(f"{self.step}:{iteration}:".encode())
-            self.formal_hash.update(torch.tensor(ready)[tpos].numpy().tobytes())
+            self.formal_hash.update(ready_tensor[tpos].numpy().tobytes())
             self.formal_hash.update(ppos.numpy().tobytes())
             tdata, tlabels = truth_data[tpos].to(self.config.device), truth_labels[tpos].to(self.config.device)
             pdata = reference.data[ppos].to(self.config.device) if count_p else None
@@ -213,6 +222,7 @@ class SPATTA(DelayedSimATTA):
             loss.backward()
             optimizer.step()
             self.main_updates += 1
+            self.formal_by_step[self.step] += 1
             self.aux_updates += int(pseudo_coef > 0)
             self.true_coefficient_sum += true_coef
             self.pseudo_coefficient_sum += pseudo_coef
@@ -247,7 +257,7 @@ class SPATTA(DelayedSimATTA):
         self.pseudo_hash.update(torch.tensor(self.pseudo_ids, dtype=torch.long).numpy().tobytes())
         if pseudo_count:
             self.pseudo_hash.update(self.source_anchors.target.cpu().long().numpy().tobytes())
-        actual = sum(1 for row in self.update_rows if row["step"] == step)
+        actual = self.formal_by_step[step]
         if actual != self.trace.quotas[step]:
             raise ValueError("Formal optimizer steps changed from reference")
         self.budget_rows.append({"step": step, "formal_updates": actual, "reference_updates": self.trace.quotas[step],
@@ -262,6 +272,10 @@ class SPATTA(DelayedSimATTA):
         self.trace.verify_feedback(self.oracle.audit())
         if self.step + 1 != self.trace.steps or self.main_updates != sum(self.trace.quotas):
             raise ValueError("Reference stream or update budget changed")
+        complete_ids = {probe_id for probe_id in self.monitored
+                        if sum(row["probe_id"] == probe_id for row in self.local_rows) == PROBE["future_batches"]}
+        for row in self.local_rows:
+            row["complete_window"] = row["probe_id"] in complete_ids
         output = Path(output_dir)
         for name, rows, fields in (
             ("gates.csv", self.gate_rows, ["step", "eligible", "gain"]),
@@ -281,6 +295,10 @@ class SPATTA(DelayedSimATTA):
                        "formal_draws_sha256": self.formal_hash.hexdigest(), "pseudo_pool_sha256": self.pseudo_hash.hexdigest(),
                        "stream_seconds": time.perf_counter() - started,
                        "peak_cuda_memory_mb": torch.cuda.max_memory_allocated() / 2**20})
+        for accepted, key in ((False, "local_aux_minus_true_pp"), (True, "accepted_local_aux_minus_true_pp")):
+            rows = [row for row in self.local_rows if row["complete_window"] and (not accepted or row["would_accept"])]
+            total = sum(row["samples"] for row in rows)
+            result[key] = 100 * sum(row["aux_correct"] - row["true_correct"] for row in rows) / total if total else None
         from experiments.delayed_feedback.run import dump_json
         dump_json(output / "compute.json", self.compute)
         return result

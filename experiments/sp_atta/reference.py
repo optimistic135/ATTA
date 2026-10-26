@@ -37,6 +37,7 @@ class SimATTATrace:
                 or result.get("method") != "SimATTA-D100-diagnosis" or settings["batch_size"] != 32):
             raise ValueError("Use the existing original SimATTA D100 diagnosis, not FCRA/Relay/CSR")
         self.simatta = settings["simatta"]
+        self.train_batch_size = settings["train_batch_size"]
         self.batches = read_csv(self.folder / "batches.csv")
         phases = read_csv(self.folder / "phases.csv")
         if not self.batches or len(phases) != len(self.batches):

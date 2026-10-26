@@ -137,7 +137,8 @@ def summarize(output, rows, seeds, diagnostic, traces):
         accuracy = [("Art (%)", "Art_accuracy_pct"), ("Cartoon (%)", "Cartoon_accuracy_pct"),
                     ("Sketch (%)", "Sketch_accuracy_pct"), ("Macro (%)", "domain_macro_accuracy_pct"),
                     ("Stream (%)", "stream_accuracy_pct")]
-        feedback = [("Returned (%)", "returned_pct"), ("Cross-domain (%)", "cross_domain_pct"), ("Pending", "pending"),
+        feedback = [("Queried", "queried"), ("Returned", "returned"), ("Returned (%)", "returned_pct"),
+                    ("Cross-domain (%)", "cross_domain_pct"), ("Pending", "pending"),
                     ("Formal updates", "main_updates"), ("Shadow updates", "candidate_updates"),
                     ("Gate accepts (%)", "gate_acceptance_pct"), ("Actual auxiliary steps (%)", "aux_update_pct")]
         blocks = []
@@ -154,7 +155,18 @@ def summarize(output, rows, seeds, diagnostic, traces):
                            "SP_minus_Fixed_stream_pp": lookup["SP-ATTA"]["stream_accuracy_pct"] - lookup["Fixed-Aux"]["stream_accuracy_pct"],
                            "SP_minus_Original_stream_pp": lookup["SP-ATTA"]["stream_accuracy_pct"] - lookup["Original-MIX"]["stream_accuracy_pct"]})
         write_csv(output / "paired.csv", paired)
+        paired_summary = []
+        for comparison, key in (("SP − TRUE", "SP_minus_TRUE_stream_pp"),
+                                ("SP − Fixed", "SP_minus_Fixed_stream_pp"),
+                                ("SP − Original", "SP_minus_Original_stream_pp")):
+            values = [row[key] for row in paired]
+            paired_summary.append({"comparison": comparison, "stream_gain_pp_mean": statistics.mean(values),
+                                   "stream_gain_pp_std": statistics.stdev(values), "n": len(values)})
+        write_csv(output / "paired_summary.csv", paired_summary)
         text = "# SP-ATTA controlled study: PACS D=100\n\n" + "\n\n".join(blocks)
+        text += "\n\n## Paired stream gains\n\n| Comparison | Gain (pp) |\n| :--- | ---: |\n"
+        text += "\n".join(f"| {row['comparison']} | {row['stream_gain_pp_mean']:.2f} ± {row['stream_gain_pp_std']:.2f} |"
+                          for row in paired_summary)
         text += "\n\nQuery/return schedules, formal quotas, formal draws and pseudo pools are matched across groups. Shadow tests run in all groups; only SP-ATTA follows their decision.\n"
     text += f"\nPhoto(source) → Art → Cartoon → Sketch; batch32; seeds={seeds}; mean ± sample standard deviation. "
     text += "Updates are recorded separately from shadow overhead; equal steps do not imply equal FLOPs. No superiority or significance claim is automatic.\n"
