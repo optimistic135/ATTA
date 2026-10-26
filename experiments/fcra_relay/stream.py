@@ -1,4 +1,4 @@
-"""Continuous recurrent PACS stream; segment IDs never enter learning decisions."""
+"""Continuous Art/Cartoon/Sketch stream; domain IDs never enter learning decisions."""
 
 from dataclasses import asdict
 from pathlib import Path
@@ -51,11 +51,7 @@ def counts(rows):
 
 @torch.no_grad()
 def run_stream(algorithm, output, progress):
-    """Photo is checkpoint source only; online visits are A,C,S,A,P.
-
-    A repeat uses the same ImageFolder identities/order; a physical image is
-    queried once globally. Labels requested on visit 1 may train visit 2.
-    """
+    """Photo is checkpoint source only; online visits are Art, Cartoon, Sketch."""
     from .spec import DEFAULTS
 
     output = Path(output)
@@ -165,7 +161,7 @@ def run_stream(algorithm, output, progress):
     if algorithm.main_updates > global_step * (DEFAULTS["current_steps"] + DEFAULTS["replay_steps"]):
         raise AssertionError("Stream update cap exceeded")
     domains = []
-    for domain in ("Art", "Cartoon", "Sketch", "Photo"):
+    for domain in ("Art", "Cartoon", "Sketch"):
         group = [row for row in stages if row["domain"] == domain]
         n = sum(row["samples"] for row in group)
         k = sum(row["correct"] for row in group)
@@ -179,7 +175,6 @@ def run_stream(algorithm, output, progress):
     result = {"method": "FCRA-Relay", "seed": algorithm.config.random_seed,
               "delay": algorithm.oracle.delay,
               **{f"{row['stage']}_accuracy_pct": row["accuracy_pct"] for row in stages},
-              "Art_accuracy_pct": domains[0]["accuracy_pct"],
               "first_three_macro_accuracy_pct": sum(row["accuracy_pct"] for row in stages[:3]) / 3,
               "first_three_stream_accuracy_pct": (100 * sum(row["correct"] for row in stages[:3])
                                                   / sum(row["samples"] for row in stages[:3])),

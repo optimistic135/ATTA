@@ -6,8 +6,8 @@
 | --- | --- |
 | 范围 | 独立新增包；D=0/20/50/100 × 三公共 seed，12 个任务；没有其他方法调度 |
 | Source | 复用严格 Photo checkpoint 加载；不调用源训练或覆盖原 checkpoint |
-| 流 | Art_1/Cartoon/Sketch/Art_2/Photo；真实域名只在 stream.py 统计，不进入 relay 决策 |
-| 重复图像 | FastDataLoader sampler 索引加域偏移，物理 ID 全流唯一；重复遇见计分但不重复查询同一图像 |
+| 流 | 仅 Art/Cartoon/Sketch；Photo 只作为源，真实域名只在 stream.py 统计，不进入 relay 决策 |
+| 图像身份 | FastDataLoader sampler 索引加域偏移，物理 ID 全流唯一，每个目标域仅访问一次 |
 | 标签时序 | select_current 和查询上下文先固定，oracle.release 后才更新 received 与语义记忆；D=0 亦如此 |
 | 校准泄漏 | 校准使用固定查询时预测；没有用当前更新后的预测冒充查询时证据；当前真标签不回写历史预测 |
 | 启动 | relay 使用保守先验；没有校准事件也可传播，不需要先完成第二轮候选审计 |

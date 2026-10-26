@@ -13,7 +13,7 @@ python -u -m experiments.fcra_relay.run \
   --dataset-root datasets \
   --gpus 0 1 \
   --seeds 110 123 456 \
-  --output-dir storage/fcra_relay/pacs_recurrent_bs32_seeds110_123_456
+  --output-dir storage/fcra_relay/pacs_acs_bs32_seeds110_123_456
 ```
 
 单卡改用 `--gpu-idx 0`，不能同时提供 `--gpus`。可选 `--checkpoint-dir /path/to/photo_checkpoint`，目录需包含 encoder_2.pth 和 fc_2.pth，默认沿用 round1 Photo 检查点；不需要 reference-dir。
@@ -23,9 +23,9 @@ python -u -m experiments.fcra_relay.run \
 ## 数据协议
 
 - Photo 源检查点独立初始化每个任务。
-- 在线流为 Art_1 → Cartoon → Sketch → Art_2 → Photo，batch=32，训练 minibatch 沿用配置（16）。
-- 全域访问，Art_2 使用相同物理图像及该 seed 的顺序。同图像全流最多查询一次；回访可受同图像已返回标签帮助。
-- 末尾 Photo 是源域回访，可能包含源训练图像，不能解释成独立泛化性能。
+- 在线流仅为 Art → Cartoon → Sketch，batch=32，训练 minibatch 沿用配置（16）。
+- 三个目标域各完整访问一次，同图像全流最多查询一次。
+- Photo 仅用于源检查点初始化，不进入在线测试流。
 - 先预测，再释放到期标签，再训练；D=0 的当前标签也不能影响当批已记录预测。
 - 不用真实域边界重置状态，oracle 时钟跨阶段连续，流末不冲刷队列。
 - 学习与决策只使用图像、模型预测及已返回真标签，域名称只用于离线统计。
@@ -50,9 +50,9 @@ summary.md 分为准确率、标签反馈、学习诊断三张表；所有均值
 
 | 文件 | 内容 |
 | --- | --- |
-| result.json | 五阶段、前三域、全流/宏平均、反馈比例与学习计数 |
+| result.json | 三目标域、全流/宏平均、反馈比例与学习计数 |
 | stages.csv | 每阶段准确率、查询归属的返回/跨域/跨阶段统计 |
-| domains.csv | 合并两次 Art 的语义域指标 |
+| domains.csv | Art、Cartoon、Sketch 三个语义域指标 |
 | batches.csv | 更新前计分、原始模型计分、融合纠对/纠错数、首次反馈前后标记 |
 | feedback.csv | 物理 ID、查询/到期/返回 batch、域/阶段、跨域/跨阶段标记 |
 | queries.csv | 选择和 pending 抑制诊断 |
@@ -73,11 +73,11 @@ summary.md 分为准确率、标签反馈、学习诊断三张表；所有均值
 
 pending_pct = 100 × 未返回数 / 查询数；同一 seed 有查询时 returned_pct + pending_pct = 100%。没有查询或没有返回时相应比例为 N/A，不写成 0。比例先逐 seed 计算再平均。
 
-cross_stage_pct 另外按访问阶段计算，区分 Art_1 和 Art_2；Art_1→Art_2 可跨阶段但不跨语义域。真实等待长度记录为 realized_delay_mean（单位 batch）。
+本流每个域仅访问一次，因此 cross_stage_pct 与 cross_domain_pct 相同。真实等待长度记录为 realized_delay_mean（单位 batch）。
 
 ## 指标解释与边界
 
-前三域平均优先看 first_three_macro_accuracy_pct（等权）和 first_three_stream_accuracy_pct（按样本数加权），不要让后面 Photo 高准确率掩盖长延迟下降。
+三域平均看 first_three_macro_accuracy_pct（等权），全流平均看 first_three_stream_accuracy_pct（按样本数加权）。因测试流只有这三个域，两者分别与 domain_macro_accuracy_pct、stream_accuracy_pct 相同；保留别名便于读取已有分析流程。
 
 relay_net_corrections 是同批固定主模型预测与融合预测的净纠错，不是 USE−SKIP 训练干预收益。raw_stream_accuracy_pct 的模型本身已经受 Relay 训练影响，也不是独立基线。
 

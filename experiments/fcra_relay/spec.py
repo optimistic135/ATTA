@@ -1,6 +1,6 @@
-"""Fixed standalone recurrent-PACS protocol and measured summary fields."""
+"""Fixed Photo-source, Art/Cartoon/Sketch PACS protocol and summary fields."""
 
-STAGES = (("Art_1", 0), ("Cartoon", 1), ("Sketch", 3), ("Art_2", 0), ("Photo", 2))
+STAGES = (("Art", 0), ("Cartoon", 1), ("Sketch", 3))
 DELAYS = (0, 20, 50, 100)
 DEFAULTS = {
     "current_steps": 4, "replay_steps": 26, "ema": 0.99,
@@ -17,7 +17,7 @@ DEFAULTS = {
     "new_consistency": "label relay overrides EMA targets without class-agreement gating",
 }
 METRICS = tuple(f"{stage}_accuracy_pct" for stage, _ in STAGES) + (
-    "Art_accuracy_pct", "first_three_macro_accuracy_pct", "first_three_stream_accuracy_pct",
+    "first_three_macro_accuracy_pct", "first_three_stream_accuracy_pct",
     "stream_accuracy_pct", "raw_stream_accuracy_pct", "domain_macro_accuracy_pct", "stage_macro_accuracy_pct",
     "before_feedback_accuracy_pct", "after_feedback_accuracy_pct",
     "queried", "returned", "returned_pct", "pending", "pending_pct",

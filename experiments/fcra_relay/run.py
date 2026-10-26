@@ -1,4 +1,4 @@
-"""Run only semantic relay on recurrent PACS: D=0,20,50,100 and three seeds."""
+"""Run semantic relay on Photo-source PACS A/C/S: D=0,20,50,100 and three seeds."""
 
 import argparse
 import csv
@@ -168,20 +168,18 @@ def summarize(rows, output, seeds):
             stage_summaries.append(summary)
     write_csv(output / "stage_summary.csv", stage_summaries)
     (output / "summary.md").write_text(
-        "# FCRA-Relay: recurrent PACS\n\nPhoto(source) → Art_1 → Cartoon → Sketch → Art_2 → Photo; batch size=32.\n\n"
+        "# FCRA-Relay: PACS\n\nPhoto(source) → Art → Cartoon → Sketch; batch size=32.\n\n"
         f"Common seeds: {', '.join(str(seed) for seed in seeds)}. "
         "Values are mean ± sample standard deviation (ddof=1).\n\n" + text +
         "\nAccuracy is scored before feedback/update. Stream accuracy is sample-weighted; "
-        "domain macro first pools both Art visits and gives Art/Cartoon/Sketch/Photo equal weight; "
-        "stage macro gives five visits equal weight. "
+        "domain macro and stage macro both give Art/Cartoon/Sketch equal weight. "
         "Cross-domain percentage is computed per seed as cross-domain returned / returned; "
         "returned percentage is returned / queried; actually delayed percentage is "
         "positive realized delay returns / returned. "
         "pending labels are excluded. A seed with no returns has N/A for this percentage; "
         "summary.csv records the valid n for every metric. "
         "Cross-stage counts different visits even when their semantic domain is the same. "
-        "Art_2 repeats physical Art images, without re-querying previously queried images; "
-        "final Photo is source-return performance, not held-out source generalization. "
+        "Photo is used only as checkpoint source and is not an online target stage. "
         "Only this method is run; no baseline gain or budget-equivalence claim is made.\n",
         encoding="utf-8")
     print(text, flush=True)
@@ -222,7 +220,7 @@ def main():
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "source": EXPERIMENT.source, "target_order": [name for name, _ in STAGES],
         "protocol": "predict before release/update; current-image learning before first feedback; "
-                    "one query per physical image; A1,C,S,A2,P; no final flush; "
+                    "one query per physical image; A,C,S; no final flush; "
                     "4 current/mixed steps plus up to 26 truth-replay steps; no candidate audits",
     }
     dump_json(output / "manifest.json", manifest)
