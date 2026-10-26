@@ -14,6 +14,10 @@ def reconstruct(weak, flipped, node_ids, anchor_features, anchor_ids, labels, cl
     single labeled image into multiple independent pieces of class evidence.
     """
     size = len(weak)
+    if size == 0 or classes < 2 or weak.shape != flipped.shape or len(node_ids) != size:
+        raise ValueError("Invalid current-graph dimensions")
+    if torch.unique(node_ids).numel() != size:
+        raise ValueError("Current graph must contain unique physical image IDs")
     device = weak.device
     identity = torch.eye(size, device=device, dtype=torch.bool)
     similarity_w = weak @ weak.T
@@ -38,6 +42,10 @@ def reconstruct(weak, flipped, node_ids, anchor_features, anchor_ids, labels, cl
               "semantic": semantic, "edges": int(edge.sum()), "class_anchors": degree.new_zeros(size)}
     if anchor_features is None or len(anchor_features) == 0:
         return result
+    if len(anchor_features) != len(labels) or len(labels) != len(anchor_ids):
+        raise ValueError("Anchor feature/label/identity length mismatch")
+    if torch.unique(anchor_ids).numel() != len(anchor_ids):
+        raise ValueError("Independent anchor support requires unique physical images")
     affinity = semantic @ anchor_features.T
     # A newly returned image can receive direct true replay, but it must not
     # seed ITS OWN reconstruction or inflate graph evidence with identity edges.
@@ -59,6 +67,8 @@ def reconstruct(weak, flipped, node_ids, anchor_features, anchor_ids, labels, cl
     mass = provenance.sum(1)
     normalized = provenance / mass[:, None].clamp_min(1e-12)
     target = normalized @ F.one_hot(labels, num_classes=classes).to(weak.dtype)
+    target_mass = target.sum(1, keepdim=True)
+    target = torch.where(target_mass > 1e-12, target / target_mass.clamp_min(1e-12), result["target"])
     top = target.topk(2, dim=1).values
     predicted = target.argmax(1)
     winning = normalized * (labels[None, :] == predicted[:, None])
@@ -74,8 +84,8 @@ def reconstruct(weak, flipped, node_ids, anchor_features, anchor_ids, labels, cl
              & (top[:, 0] >= D["assignment_confidence"])
              & ((top[:, 0] - top[:, 1]) >= D["assignment_margin"])
              & (agreement >= D["neighbor_agreement"]))
-    # Every CE target must be a normalized distribution, including invalid nodes.
-    target = torch.where((mass > 0)[:, None], target, result["target"])
+    # Uniform fallback is a serialization convenience; invalid nodes always
+    # have zero classification weight and are NOT trained as uniform classes.
     result.update({"target": target, "valid": valid,
                    "weight": valid * top[:, 0] * agreement * mass.clamp(0, 1),
                    "mass": mass, "support": support, "agreement": agreement,

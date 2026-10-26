@@ -70,22 +70,26 @@ class FCRACSR(FCRA):
         return logits
 
     @torch.no_grad()
-    def _encode(self, images, flip=False):
-        features = []
+    def _encode(self, images, flip=False, predictions=False):
+        features, categories = [], []
         self.ema.eval()
         for start in range(0, len(images), self.config.atta.batch_size):
             batch = images[start:start + self.config.atta.batch_size].to(self.config.device)
             if flip:
                 batch = batch.flip(-1)
-            features.append(F.normalize(self.ema[0](batch), dim=1))
-        return torch.cat(features)
+            raw = self.ema[0](batch)
+            features.append(F.normalize(raw, dim=1))
+            if predictions:
+                categories.append(self.ema[1](raw).argmax(1))
+        encoded = torch.cat(features)
+        return (encoded, torch.cat(categories)) if predictions else encoded
 
     @torch.no_grad()
     def _build_graph(self):
         self.buffer.append((self.current_data.cpu(), self.current_ids))
         self.buffer_data = torch.cat([entry[0] for entry in self.buffer])
         self.buffer_ids = torch.cat([entry[1] for entry in self.buffer]).to(self.config.device)
-        weak = self._encode(self.buffer_data)
+        weak, prediction = self._encode(self.buffer_data, predictions=True)
         flipped = self._encode(self.buffer_data, flip=True)
         self.reference_features = F.normalize(weak + flipped, dim=1)
         anchor_features = anchor_ids = labels = None
@@ -106,10 +110,8 @@ class FCRACSR(FCRA):
         accepted = int(self.graph["valid"].sum())
         self.graph_eligible_nodes += accepted
         self.graph_total_nodes += count
-        self.ema.eval()
-        # Head-only diagnostics reuse encoded features; these predictions do not
-        # seed the graph and do not affect assignment eligibility.
-        prediction = self.ema[1](weak).argmax(1)
+        # Diagnostics use the EMA head's ORIGINAL, unnormalized inputs. These
+        # predictions never seed the graph or affect assignment eligibility.
         disagreements = self.graph["valid"] & (self.graph["target"].argmax(1) != prediction)
         self.graph_rows.append({"step": self.stream_step, "nodes": count,
                                 "returned_anchors": len(self.received), "directed_edges": self.graph["edges"],
@@ -122,7 +124,8 @@ class FCRACSR(FCRA):
         for i in range(count):
             self.assignment_rows.append({"step": self.stream_step, "sample_id": int(self.buffer_ids[i]),
                                           "accepted": bool(self.graph["valid"][i]),
-                                          "reconstructed_class": int(self.graph["target"][i].argmax()),
+                                          "reconstructed_class": (int(self.graph["target"][i].argmax())
+                                                                  if bool(self.graph["valid"][i]) else None),
                                           "confidence": float(self.graph["confidence"][i]),
                                           "anchor_count": int(self.graph["class_anchors"][i]),
                                           "effective_anchors": float(self.graph["support"][i]),
