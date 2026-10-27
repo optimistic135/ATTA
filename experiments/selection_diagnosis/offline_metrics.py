@@ -6,6 +6,11 @@ from collections import defaultdict
 DOMAINS = ("ALL", "Art", "Cartoon", "Sketch")
 PERIODS = ("all", "early", "middle", "late")
 FRACTION = 0.1
+BATCH_FIELDS = ("seed", "step", "domain", "period", "pool", "branch", "available_images",
+    "base_candidates", "selected_weight", "actual_coverage_pct", "selected_of_available_pct",
+    "old_domain_candidates", "confidence_high_correct", "confidence_low_correct", "risk_high_correct",
+    "risk_low_correct", "random_expected_correct", "confidence_boundary", "risk_boundary",
+    "confidence_boundary_ties", "risk_boundary_ties")
 
 
 def ratio(n, d, scale=100):
@@ -105,14 +110,18 @@ def batch_rankings(seed, observations, batches, confidence):
     return records, summaries, periods
 
 
-def bias_and_correction(seed, arrivals, feedback, queries, periods, confidence):
+def bias_and_correction(seed, arrivals, feedback, queries, periods, confidence, shadow_updates):
     """Time-matched query bias plus paired correctness labels on the exact same images."""
     identities = {r["sample_id"]: r for r in feedback}
     returned_steps = {r["query_step"] for r in feedback if r["return_step"] is not None}
     query_map = {(r["anchor_index"], r["branch"]): r for r in queries}
     bias, correction = [], []
-    audit = {"seed": seed, "returned_prediction_pairs": 0, "correctness_mismatches": 0,
-             "max_score_abs_difference": 0.0, "max_confidence_abs_difference": 0.0}
+    audit = {"seed": seed, "returned_prediction_records": 0, "correctness_mismatches": 0,
+             "max_score_abs_difference": 0.0, "max_confidence_abs_difference": 0.0,
+             "informative_returned_queries": 0, "first_informative_return_step": None,
+             "first_repair_fix_return_step": None, "first_repair_break_return_step": None,
+             "first_informative_training_step": None, "informative_training_draws": 0,
+             "total_risk_training_draws": 0}
     for row in arrivals:
         fb = identities.get(row["sample_id"])
         row["queried"] = fb is not None
@@ -123,7 +132,7 @@ def bias_and_correction(seed, arrivals, feedback, queries, periods, confidence):
         if row["returned_query"]:
             for branch in ("source", "repair"):
                 q = query_map[(fb["anchor_index"], branch)]
-                audit["returned_prediction_pairs"] += 1
+                audit["returned_prediction_records"] += 1
                 audit["correctness_mismatches"] += int(q["correct"] != row[f"{branch}_correct"])
                 audit["max_score_abs_difference"] = max(audit["max_score_abs_difference"], abs(q["score"] - row[f"{branch}_score"]))
                 audit["max_confidence_abs_difference"] = max(audit["max_confidence_abs_difference"], abs(q["confidence"] - row[f"{branch}_confidence"]))
@@ -149,13 +158,26 @@ def bias_and_correction(seed, arrivals, feedback, queries, periods, confidence):
                             "confidence_brier": statistics.mean((r[f"{branch}_confidence"] - r[f"{branch}_correct"]) ** 2 for r in chosen) if chosen else None,
                             "mean_score": statistics.mean(r[f"{branch}_score"] for r in chosen) if chosen else None})
     # Returned cases use canonical stored query-time correctness, not refitted predictions.
-    returned = []
+    returned, informative_ids = [], set()
     for fb in feedback:
         if fb["return_step"] is None:
             continue
         s, r = query_map[(fb["anchor_index"], "source")], query_map[(fb["anchor_index"], "repair")]
+        if s["correct"] != r["correct"]:
+            informative_ids.add(fb["anchor_index"])
+            audit["informative_returned_queries"] += 1
+            key = "first_repair_fix_return_step" if r["correct"] else "first_repair_break_return_step"
+            for name in ("first_informative_return_step", key):
+                if audit[name] is None or fb["return_step"] < audit[name]:
+                    audit[name] = fb["return_step"]
         returned.append({"image_domain": fb["query_domain"], "warm": s["warm_at_query"],
             "risk_updates": s["risk_updates_at_query"], "source_correct": s["correct"], "repair_correct": r["correct"]})
+    for update in shadow_updates:
+        audit["total_risk_training_draws"] += len(update["indices"])
+        informative = sum(index in informative_ids for index in update["indices"])
+        audit["informative_training_draws"] += informative
+        if informative and (audit["first_informative_training_step"] is None or update["step"] < audit["first_informative_training_step"]):
+            audit["first_informative_training_step"] = update["step"]
     for domain in DOMAINS:
         for phase in phases:
             for population, population_rows in (("returned_training_records", returned), ("all_arrivals", arrivals)):
