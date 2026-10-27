@@ -37,6 +37,15 @@ CLI help, unit test, training, or experiment was run locally.
   including early no-feedback rows. An eligible gate only replaces existing values.
   This fixes the reported end-of-stream DictWriter error without dropping columns
   or altering training. Other record lists have fixed keys within each run.
+- Resume: opt-in with an explicit existing output directory. Validate root protocol,
+  settings, final metrics, output presence, feedback trajectory and formal budgets
+  before any archive mutation. Completed tasks are loaded once; pending jobs only
+  are scheduled. Incomplete attempts and old summaries are moved to timestamped
+  archives. Updated launchers hold a nonblocking directory lock. Legacy processes
+  must be stopped manually. This is task-level recovery, not batch-level recovery.
+- Completed runs keep original settings/logs and provenance; resume_history records
+  previous commits. Git identity may differ for output-only fixes, not algorithm
+  comparisons. No Python or resume execution was performed locally.
 
 Limitations: no runtime validation; dataset identity is checked by stream shape and
 reference IDs, not a full image-content hash. A repaired linear head may lack capacity;

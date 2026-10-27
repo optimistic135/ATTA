@@ -26,6 +26,7 @@ def parser():
     cli.add_argument("--checkpoint-dir", type=Path, default=EXPERIMENT.checkpoint_dir)
     cli.add_argument("--reference-dir", type=Path, required=True)
     cli.add_argument("--output-dir", type=Path)
+    cli.add_argument("--resume", action="store_true", help="Reuse completed tasks in --output-dir; rerun incomplete tasks")
     cli.add_argument("--seeds", type=int, nargs=3, default=[110, 123, 456])
     devices = cli.add_mutually_exclusive_group()
     devices.add_argument("--gpus", type=int, nargs="+")
@@ -147,6 +148,8 @@ def main():
     args.dataset = "PACS"
     args.dataset_root, args.checkpoint_dir = args.dataset_root.resolve(), args.checkpoint_dir.resolve()
     args.reference_dir = args.reference_dir.resolve()
+    if args.resume and (args.output_dir is None or args.worker):
+        raise ValueError("--resume requires an explicit --output-dir and is parent-only")
     if args.output_dir:
         args.output_dir = args.output_dir.resolve()
     if args.worker:
@@ -161,9 +164,23 @@ def main():
         raise ValueError("Use three distinct valid seeds")
     if len(set(gpus)) != len(gpus) or any(gpu < 0 for gpu in gpus):
         raise ValueError("Use unique nonnegative GPU indices")
-    traces = {str(seed): SimATTATrace(args.reference_dir, seed, args.checkpoint_dir).hashes for seed in seeds}
+    references = {seed: SimATTATrace(args.reference_dir, seed, args.checkpoint_dir) for seed in seeds}
+    traces = {str(seed): trace.hashes for seed, trace in references.items()}
     output = args.output_dir or ROOT / "storage/feedback_teacher" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
-    output.mkdir(parents=True, exist_ok=False)
+    if args.resume:
+        if not (output / "manifest.json").is_file():
+            raise ValueError("--resume needs an existing experiment directory containing manifest.json")
+    else:
+        output.mkdir(parents=True, exist_ok=False)
+    # Linux/macOS advisory lock: prevents two updated launchers sharing this output.
+    # The local handle remains alive throughout main; process exit releases it.
+    import fcntl
+    output_lock = (output / ".run.lock").open("a")
+    try:
+        fcntl.flock(output_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        output_lock.close()
+        raise ValueError("Another launcher is using this output directory") from None
     manifest = {"status": "running", "dataset": "PACS", "groups": GROUPS, "seeds": seeds,
         "delays": [100], "batch_size": 32, "gpus": gpus, "reference_dir": str(args.reference_dir),
         "reference_hashes": traces, "defaults": DEFAULTS,
@@ -171,9 +188,15 @@ def main():
         "checkpoint_sha256": {name: sha256(args.checkpoint_dir / name) for name in EXPERIMENT.checkpoint_names},
         "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
         "python": sys.version, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}
+    rows = []
+    jobs = [(g, s) for g in GROUPS for s in seeds]
+    if args.resume:
+        from .resume import prepare_resume
+        rows, jobs = prepare_resume(output, manifest, args, references)
+    manifest["completed_runs"] = len(rows)
     dump_json(output / "manifest.json", manifest)
     print(f"Groups: {GROUPS}\nSeeds: {seeds}\nGPUs: {gpus}\nResults: {output}", flush=True)
-    rows = []
+    print(f"Reusing {len(rows)} completed tasks; pending {len(jobs)}", flush=True)
     def launch(job, gpu):
         group, seed = job
         run_dir = output / group / f"seed_{seed}"
@@ -206,7 +229,13 @@ def main():
         progress.finish(result)
     try:
         with ProgressDisplay(gpus, 9) as progress:
-            run_jobs([(g, s) for g in GROUPS for s in seeds], gpus, launch, save)
+            for result in rows:
+                print(f"Skipping completed: {result['method']} seed={result['seed']}", flush=True)
+                progress.finish(result)
+            if rows:
+                write_csv(output / "per_seed.csv", rows)
+            if jobs:
+                run_jobs(jobs, gpus, launch, save)
         summarize(output, rows, seeds, traces)
     except BaseException:
         manifest.update(status="failed", completed_runs=len(rows))

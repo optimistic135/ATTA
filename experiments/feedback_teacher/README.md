@@ -73,7 +73,29 @@ python -u -m experiments.feedback_teacher.run \
   --output-dir storage/feedback_teacher/pacs_d100_seeds110_123_456
 ```
 
-每 GPU 同时一个任务，保留逐域及总任务进度条。单卡将 `--gpus 0 1` 替换为 `--gpu-idx 0`。可使用 `--checkpoint-dir PATH`、`--num-workers N`。输出目录必须不存在，禁止覆盖旧结果。
+每 GPU 同时一个任务，保留逐域及总任务进度条。单卡将 `--gpus 0 1` 替换为 `--gpu-idx 0`。可使用 `--checkpoint-dir PATH`、`--num-workers N`。新实验输出目录必须不存在；使用下面的 `--resume` 才能复用旧目录。
+
+### 原目录断点续跑
+
+先确认旧启动器及其子任务已停止，再执行：
+
+```bash
+python -u -m experiments.feedback_teacher.run \
+  --dataset-root datasets \
+  --reference-dir storage/simatta_rootcause/pacs_d100_bs32_seeds110_123_456 \
+  --gpus 0 1 \
+  --seeds 110 123 456 \
+  --output-dir storage/feedback_teacher/pacs_d100_seeds110_123_456 \
+  --resume
+```
+
+- 按“方法 × seed”判断完成状态，校验 `result.json`、相关输出文件、配置、反馈轨迹和更新预算；完整结果直接跳过，原文件及日志保持不变。
+- 只有 batches.csv 或部分诊断 CSV、没有完整最终结果的任务仍属于未完成，从该 seed 的初始源检查点重新执行。当前实现没有逐 batch 的模型/优化器检查点，不能从中间 batch 恢复。
+- 先把待重跑任务的旧目录、日志和旧汇总移入同一输出目录的 `_resume_archive/UTC时间/`，再运行；不删除残留数据。
+- 所有任务完成后，合并复用结果与新结果，重建同一目录中的汇总表。若全部完成，则只校验并重新汇总，不启动 GPU 子任务。
+- seeds、参考文件哈希、源检查点哈希、方法默认参数和数据路径必须一致；GPU 分配及 num-workers 可以调整。
+- 记录 resume_history 及旧 manifest，允许本次 CSV 输出修复后的代码复用修复前已经成功完成的任务；不要求 Git commit 相同。若以后改动算法，请使用新输出目录，避免混合不同算法的结果。
+- 更新后的启动器使用目录锁防止并行续跑；旧版启动器不认识此锁，必须先手动停止旧任务。
 
 `--reference-dir` 必须是已完成的**原始 SimATTA D100 根因诊断**根目录，含 `D100/seed_110` 等；不是 sp_atta、scaled、FCRA 的结果目录。实验不会调用诊断代码重新生成参考轨迹。
 
