@@ -40,7 +40,7 @@ def tail(rows, score_key, correct_key, high):
     return {"weight": k, "correct": correct, "boundary": boundary, "tied": len(tied)}
 
 
-def batch_rankings(seed, observations, batches, confidence):
+def batch_rankings(seed, observations, batches, confidence, selected_steps=None):
     by_step = defaultdict(list)
     for row in observations:
         by_step[row["step"]].append(row)
@@ -49,7 +49,7 @@ def batch_rankings(seed, observations, batches, confidence):
         rows = by_step[step]
         if len({r["warm"] for r in rows}) != 1:
             raise ValueError(f"Inconsistent warmup at step {step}")
-        if rows[0]["warm"]:
+        if (rows[0]["warm"] if selected_steps is None else step in selected_steps):
             warm_steps[batch["domain"]].append(step)
     periods = {}
     for steps in warm_steps.values():
