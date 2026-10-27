@@ -41,6 +41,12 @@ def summarize(output, results):
     write_csv(output / "per_arm.csv", per_arm)
     lookup = {(r["seed"], r["arm"], r["phase"], r["domain"]): r for r in per_arm}
     seeds = [r["seed"] for r in results]
+    for result in results:
+        seed = result["seed"]
+        for domain in ("ALL", "Art", "Cartoon", "Sketch"):
+            factual = result["stream_accuracy_pct" if domain == "ALL" else f"{domain}_accuracy_pct"]
+            if abs(lookup[seed, ARMS[0], "all", domain]["accuracy_pct"] - factual) > 1e-8:
+                raise AssertionError("SP arm and factual parent accuracy disagree")
     summaries = []
     for arm in ARMS:
         for phase in ("all", "before_feedback", "after_feedback"):

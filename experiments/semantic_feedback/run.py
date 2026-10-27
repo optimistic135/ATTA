@@ -13,7 +13,7 @@ from experiments.delayed_feedback.progress import ProgressDisplay, emit_progress
 from experiments.delayed_feedback.run import dump_json, sha256, validate_inputs, write_csv
 from experiments.delayed_feedback.scheduler import run_jobs
 from experiments.sp_atta.reference import SimATTATrace
-from .spec import METHOD, DEFAULTS, CLIP_SHA256, validate_classes
+from .spec import METHOD, DEFAULTS, ARMS, CLIP_SHA256, validate_classes
 from .report import arm_results, summarize
 
 EXPERIMENT = EXPERIMENTS["PACS"]
@@ -98,6 +98,10 @@ def load_completed(folder, seed, trace):
         return None
     if any(row.get("seed") != seed for row in result["arms"]):
         raise ValueError(f"Prediction arm seed mismatch: {folder}")
+    expected = {(a, p, d) for a in ARMS for p in ("all", "before_feedback", "after_feedback")
+                for d in ("ALL", "Art", "Cartoon", "Sketch")}
+    if {(r.get("arm"), r.get("phase"), r.get("domain")) for r in result["arms"]} != expected:
+        raise ValueError(f"Prediction arm table is incomplete: {folder}")
     from experiments.sp_atta.reference import read_csv
     trace.verify_feedback(read_csv(folder / "feedback.csv"))
     return result
@@ -181,7 +185,11 @@ def main():
         "checkpoint_sha256": {name: sha256(args.checkpoint_dir / name) for name in EXPERIMENT.checkpoint_names},
         "dataset_root": str(args.dataset_root), "checkpoint_dir": str(args.checkpoint_dir),
         "clip_checkpoint": str(args.clip_checkpoint), "clip_sha256": CLIP_SHA256,
-        "code_sha256": {p.name: sha256(p) for p in Path(__file__).parent.glob("*.py")},
+        "code_sha256": {str(p.relative_to(ROOT)): sha256(p) for p in
+            list(Path(__file__).parent.glob("*.py")) + [ROOT / name for name in (
+                "experiments/sp_atta/algorithm.py", "experiments/sp_atta/reference.py",
+                "experiments/delayed_feedback/simatta.py", "experiments/delayed_feedback/protocol.py",
+                "experiments/simatta_rootcause/algorithm.py")]},
         "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "python": sys.version, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}
     completed, pending = prepare_resume(output, manifest, args, references) if args.resume else ([], list(seeds))
