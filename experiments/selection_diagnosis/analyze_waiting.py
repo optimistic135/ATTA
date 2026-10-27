@@ -3,11 +3,13 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sys
 
 from .analyze_batches import load_seed, sha256, dump_json, write_csv, cell, SOURCE_METHOD
-from .offline_metrics import BATCH_FIELDS, aggregate, batch_rankings
+from .offline_metrics import BATCH_FIELDS, FRACTION, aggregate, batch_rankings
 
 METHOD = "SP-waiting-elite-offline-analysis"
+VERSION = 1
 FILES = ("per_batch.csv", "per_seed.csv", "summary.csv", "summary.md")
 
 
@@ -30,6 +32,8 @@ def main():
     if any(output == p.resolve() or output in p.resolve().parents for p in inputs):
         raise ValueError("Output may not replace input files")
     hashes = {str(p.relative_to(root)): sha256(p) for p in inputs}
+    config = {"method": METHOD, "version": VERSION, "fraction": FRACTION,
+              "scope": "through first return batch inclusive; predictions precede return"}
     output.parent.mkdir(parents=True, exist_ok=True)
     import fcntl
     with (output.parent / f".{output.name}.analysis.lock").open("a") as lock:
@@ -41,7 +45,7 @@ def main():
             if not args.resume:
                 raise FileExistsError("Use --resume or a new --output-dir")
             previous = json.loads((output / "manifest.json").read_text())
-            if previous.get("method") != METHOD or previous.get("input_hashes") != hashes:
+            if previous.get("config") != config or previous.get("input_hashes") != hashes:
                 raise ValueError("Different input/settings; use a new directory")
             if previous.get("status") == "complete":
                 if any(not (output / name).is_file() or sha256(output / name) != previous.get("output_hashes", {}).get(name) for name in FILES):
@@ -53,7 +57,8 @@ def main():
             output.rename(archive)
         output.mkdir(parents=True, exist_ok=False)
         manifest = {"status": "running", "method": METHOD, "input_hashes": hashes, "seeds": seeds,
-                    "input_dir": str(root), "fraction": 0.1, "scope": "through first return batch inclusive; predictions precede return"}
+                    "input_dir": str(root), "config": config, "python": sys.version,
+                    "source_git_commit": source.get("git_commit")}
         dump_json(output / "manifest.json", manifest)
         per_batch, per_seed = [], []
         try:

@@ -97,3 +97,12 @@ python -u -m experiments.selection_diagnosis.analyze_batches \
 - 差异反馈首次进入训练很晚：warmup总体样本数不等于已有充分的校正优势监督，不能只延长或放宽阈值来宣称解决问题。
 
 **本地未执行Python、测试或分析，只做静态审查；服务器运行后才有新数据结果。**
+
+## 单独补查等待期与Art
+
+```bash
+python -u -m experiments.selection_diagnosis.analyze_waiting \
+  --input-dir storage/selection_diagnosis/pacs_d100_seeds110_123_456
+```
+
+无需重训，默认输出`waiting_analysis/`，包含第一次返回批的更新前预测；不要求warmup。实际训练收益的后续影子实验见`experiments/confident_source_diagnosis/README.md`。
