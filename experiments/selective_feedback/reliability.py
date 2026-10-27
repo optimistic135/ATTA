@@ -8,7 +8,8 @@ def descriptors(source, repair):
     """2C+8 bounded features: probabilities, confidences, margins, entropies, agreement, JS."""
     s_top, r_top = source.topk(2, dim=1).values, repair.topk(2, dim=1).values
     log_c = math.log(source.shape[1])
-    entropy = lambda q: -(q * q.clamp_min(1e-12).log()).sum(1) / log_c
+    def entropy(q):
+        return -(q * q.clamp_min(1e-12).log()).sum(1) / log_c
     mean = (source + repair) / 2
     js = (0.5 * (source * (source.clamp_min(1e-12).log() - mean.clamp_min(1e-12).log())).sum(1)
           + 0.5 * (repair * (repair.clamp_min(1e-12).log() - mean.clamp_min(1e-12).log())).sum(1)) / math.log(2)

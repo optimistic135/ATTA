@@ -76,7 +76,7 @@ class SelectiveFeedback(SPATTA):
         qs, qr = self.teacher[1](wf).softmax(1), self.head(wf).softmax(1)
         ss, sr = self.teacher[1](sf).softmax(1), self.head(sf).softmax(1)
         scores = self.risk(descriptors(qs, qr)).sigmoid()
-        if not bool(torch.isfinite(torch.cat((qs, qr, scores), dim=1)).all()):
+        if not bool(torch.isfinite(torch.cat((qs, qr, ss, sr, scores), dim=1)).all()):
             raise FloatingPointError("Non-finite target or reliability score")
         warm = len(self.risk_memory) >= D["min_feedback"] and self.reliability_updates >= D["min_reliability_updates"]
         fresh_ids = {int(self.query_anchors.target[i]) for i, _ in released}
@@ -130,6 +130,8 @@ class SelectiveFeedback(SPATTA):
             self.source_confidence_brier += (record["source_confidence"] - float(correctness[0])) ** 2
             self.repair_confidence_brier += (record["repair_confidence"] - float(correctness[1])) ** 2
             self.feedback_rows.append({"step": step, "anchor_index": index,
+                "source_prediction": record["source"], "repair_prediction": record["repair"],
+                "returned_label": label, "query_features": json.dumps(record["features"].tolist()),
                 "source_correct": int(correctness[0]), "repair_correct": int(correctness[1]),
                 "query_source_confidence": record["source_confidence"], "query_repair_confidence": record["repair_confidence"],
                 "query_source_score": float(record["scores"][0]), "query_repair_score": float(record["scores"][1])})
