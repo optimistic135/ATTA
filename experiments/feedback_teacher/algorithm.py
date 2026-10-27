@@ -136,6 +136,8 @@ class FeedbackTeacher(SPATTA):
                   else "no_formal_quota" if not self.trace.quotas[step] else "eligible")
         row = {"step": step, "domain": domain, "fresh_count": len(released),
                "eligible": reason == "eligible", "reason": reason,
+               # CSV columns must also exist before the first eligible gate.
+               "true_candidate_ce": None, "aux_candidate_ce": None,
                "gain": None, "would_accept": False, "selected_lambda": 0.0}
         if reason == "eligible":
             with isolated_randomness() as state:

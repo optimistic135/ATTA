@@ -33,6 +33,10 @@ CLI help, unit test, training, or experiment was run locally.
 - Per-seed aggregation uses sample SD and valid metric n. Paired differences computed
   within seed. Query teacher accuracy is conditional, not whole-stream accuracy.
 - New output directories only; logs and partial rows preserved on failure.
+- CSV gate schema: all rows initialize true_candidate_ce and aux_candidate_ce,
+  including early no-feedback rows. An eligible gate only replaces existing values.
+  This fixes the reported end-of-stream DictWriter error without dropping columns
+  or altering training. Other record lists have fixed keys within each run.
 
 Limitations: no runtime validation; dataset identity is checked by stream shape and
 reference IDs, not a full image-content hash. A repaired linear head may lack capacity;
