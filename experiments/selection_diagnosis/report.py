@@ -46,8 +46,8 @@ def seed_reports(seed, algorithm, result):
             warm = [r for r in observations if r["warm"] and r["allowed"]]
             base = [r for r in warm if r[confidence] >= D["confidence"] and r[f"{branch}_consistent"]]
             for pool_name, rows in (("warm_all", warm), ("warm_base", base)):
-                for name, key, threshold in ((branch, score, D["reliability_threshold"]),):
-                    sections["distribution"].append(distribution(seed, domain, name, pool_name, rows, key, threshold))
+                sections["distribution"].append(distribution(seed, domain, branch, pool_name,
+                                                            rows, score, D["reliability_threshold"]))
                 if branch == "repair":
                     sections["distribution"].append(distribution(seed, domain, "repair_margin", pool_name,
                                                                 rows, "repair_margin", D["correction_margin"]))
