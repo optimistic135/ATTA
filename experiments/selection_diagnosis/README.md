@@ -143,3 +143,14 @@ SP正式更新计入main_updates，影子模块计入shadow_head_updates / shado
 - 学习前样本占多数：总Brier≈0.25不能作为学习后无效的充分证据。
 
 **本地仅静态审查，未执行Python、测试、诊断或训练，不预填结果。**
+
+## 无需重训的同批次分析
+
+已有本诊断的完整结果后，运行：
+
+```bash
+python -u -m experiments.selection_diagnosis.analyze_batches \
+  --input-dir storage/selection_diagnosis/pacs_d100_seeds110_123_456
+```
+
+只读现有CSV，默认写入`batch_analysis/`；不需要GPU、原图或检查点。比较当批新图像的固定前10%置信度/风险排序/随机期望、时间稳定性、查询偏差和差异标签训练时序。详见[BATCH_ANALYSIS.md](BATCH_ANALYSIS.md)。

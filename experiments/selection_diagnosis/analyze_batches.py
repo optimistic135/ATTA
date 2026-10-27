@@ -162,7 +162,7 @@ def load_seed(root, seed, manifest):
         if step in steps or not 0 <= step < len(batches) or not isinstance(indices, list):
             raise ValueError("Invalid shadow update clock")
         for index in indices:
-            if not isinstance(index, int) or not 0 <= index < len(feedback) or feedback[index]["return_step"] is None or feedback[index]["return_step"] > step:
+            if type(index) is not int or not 0 <= index < len(feedback) or feedback[index]["return_step"] is None or feedback[index]["return_step"] > step:
                 raise ValueError("Risk training draw used a label before its return")
         steps.add(step)
         shadow_updates.append({"step": step, "indices": indices})
@@ -233,11 +233,11 @@ def main():
             or manifest.get("delays") != [100] or manifest.get("batch_size") != 32):
         raise ValueError("Input must be a completed screening-usability PACS D100 result root")
     seeds = manifest["seeds"]
-    if len(seeds) != 3 or len(set(seeds)) != 3:
+    if len(seeds) != 3 or len(set(seeds)) != 3 or any(type(seed) is not int or not 0 <= seed < 2**32 for seed in seeds):
         raise ValueError("Input must contain three distinct seeds")
     files = [root / "manifest.json"] + [root / f"seed_{seed}" / name for seed in seeds for name in
         ("settings.json", "result.json", "batches.csv", "score_observations.csv", "query_scores.csv", "feedback.csv", "shadow_updates.csv")]
-    if any(output == p or output == p.parent or output in p.parents for p in files):
+    if any(output == p.resolve() or output in p.resolve().parents for p in files):
         raise ValueError("Output may not contain or replace input files")
     hashes = {str(p.relative_to(root)): sha256(p) for p in files}
     confidence = probability(manifest["defaults"]["confidence"])
