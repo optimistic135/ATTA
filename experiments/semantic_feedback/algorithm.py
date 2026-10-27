@@ -30,6 +30,8 @@ class SemanticFeedback(SPATTA):
         semantic = self.semantic.probabilities(data)
         fixed = (1 - D["initial_weight"]) * sp + D["initial_weight"] * semantic
         self.current = dict(zip(ARMS, (sp.cpu(), semantic.cpu(), fixed.cpu(), self.fusion(sp, semantic).cpu())))
+        if self.fusion.updates == 0 and not torch.equal(self.current[ARMS[2]].argmax(-1), self.current[ARMS[3]].argmax(-1)):
+            raise AssertionError("Untrained fusion must agree with fixed fusion")
         self.before_feedback = not self.seen_feedback
         for record in self.trace.queries[self.step]:
             sid = int(record["sample_id"])
@@ -91,6 +93,8 @@ class SemanticFeedback(SPATTA):
         started = time.perf_counter()
         result = super().run_stream(output_dir, progress)
         output = Path(output_dir)
+        if len(self.feedback_rows) != result["returned"] or len(self.query_predictions) != result["pending"]:
+            raise AssertionError("Fusion feedback/cache lost alignment with the delayed oracle")
         save_rows(output / "arm_batches.csv", self.prediction_rows, ["step", "domain", "arm", "samples", "correct"])
         save_rows(output / "fusion_feedback.csv", self.feedback_rows, ["step", "sample_id", "label"])
         save_rows(output / "fusion_weights.csv", self.weight_rows, ["step", "class", "weight_after"])

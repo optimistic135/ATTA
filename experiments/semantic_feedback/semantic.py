@@ -6,6 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .spec import CLASSES, DEFAULTS as D
+from experiments.delayed_feedback.run import sha256
 
 
 class FrozenSemantic:
@@ -17,6 +18,8 @@ class FrozenSemantic:
         if not checkpoint.is_file() or not hasattr(clip, "load") or not hasattr(clip, "tokenize"):
             raise ValueError("Need a local official CLIP checkpoint and the OpenAI CLIP package")
         self.model, _ = clip.load(str(checkpoint), device=device, jit=False)
+        from pathlib import Path
+        self.package_sources = {p.name: sha256(p) for p in Path(clip.__file__).parent.glob("*.py")}
         self.model.eval().requires_grad_(False)
         if self.model.visual.input_resolution != 224:
             raise ValueError("This fixed experiment requires ViT-B/32 at 224 pixels")
