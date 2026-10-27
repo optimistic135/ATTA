@@ -89,15 +89,22 @@ class FeedbackTeacher(SPATTA):
         self.current_seen += len(ids)
         self.current_eligible += int(mask.sum())
         self.repair_used += int(use_repair)
-        # Fixed private draw shared by both candidates and formal steps this batch.
-        generator = torch.Generator().manual_seed(self.config.random_seed + 3000017 * self.step + 83)
-        positions = torch.randperm(len(ids), generator=generator)[:self.config.train.train_bs]
-        self.current = (strong[positions].to(self.config.device), q[positions.to(q.device)].detach(),
-                        mask[positions.to(mask.device)].detach())
+        self.current_pool = (strong, q.detach(), mask.detach())
+        self._draw_current(0)
         self.current_rows.append({"step": self.step, "buffer_samples": len(ids),
             "eligible": int(mask.sum()), "training_eligible": int(self.current[2].sum()),
             "repaired_targets": use_repair, "prior_evidence": self.teacher_evidence,
             "excluded_fresh": int((~allowed).sum())})
+
+    def _draw_current(self, iteration):
+        # Shared private index schedule; masks/teacher targets may differ by arm.
+        images, targets, mask = self.current_pool
+        generator = torch.Generator().manual_seed(
+            self.config.random_seed + 3000017 * self.step + 7919 * iteration + 83)
+        positions = torch.randperm(len(images), generator=generator)[:self.config.train.train_bs]
+        device_positions = positions.to(targets.device)
+        self.current = (images[positions].to(self.config.device),
+                        targets[device_positions], mask[device_positions])
 
     def on_labels_released(self, step, domain, released):
         if self.study_group == "SP-ATTA":
@@ -252,6 +259,7 @@ class FeedbackTeacher(SPATTA):
                 true, pseudo, coefficient = loss, None, 0.0
             else:
                 coefficient = self.lambda_batch
+                self._draw_current(iteration)
                 loss, true, pseudo = self._loss(self.model, images, labels, None, None, 1.0, coefficient)
                 if not torch.isfinite(loss):
                     raise FloatingPointError("Non-finite student loss")

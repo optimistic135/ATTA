@@ -85,6 +85,10 @@ def summarize(output, rows, seeds, traces):
                 raise ValueError(f"Matched trace mismatch: {key}, seed={seed}")
         if any(r["reference_hashes"] != traces[str(seed)] for r in matched):
             raise ValueError("Reference changed during sweep")
+        current = [r for r in matched if r["method"] != "SP-ATTA"]
+        for key in ("student_updates", "head_updates"):
+            if len({r[key] for r in current}) != 1:
+                raise ValueError(f"Current-arm budget mismatch: {key}, seed={seed}")
     summaries = [aggregate(group, [r for r in rows if r["method"] == group], METRICS) for group in GROUPS]
     write_csv(output / "summary.csv", summaries)
     write_csv(output / "per_seed.csv", rows)
