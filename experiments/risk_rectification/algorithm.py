@@ -53,7 +53,7 @@ class RiskRectification(SPATTA):
             position = int(row["sample_id"]) - int(stream_ids[0])
             self.source_cache[int(row["anchor_index"])] = (normalized[position].clone(), probability[position].cpu().clone())
         self.diagnostic = {"memory": len(self.received), "eligible": False, "reason": "no_formal_training",
-            "ess": None, "ess_fraction": None, "clip_fraction": None, "holdout_accuracy": None,
+            "ess": None, "ess_fraction": None, "raw_ess": None, "clip_fraction": None, "holdout_accuracy": None,
             "proxy_risk": float(soft_loss(bounded_log_probability(outputs), probability).mean()),
             "memory_residual": None, "rectified_risk": None}
         return outputs
@@ -71,11 +71,13 @@ class RiskRectification(SPATTA):
         features = torch.stack([self.source_cache[i][0] for i in ready])
         density = estimate_weights(features, self.current_features)
         self.diagnostic["reason"] = "insufficient_memory_or_batch" if density is None else "eligible" if density["eligible"] else "low_ess"
-        self.eligible = density is not None and density["eligible"]
+        self.eligible = density is not None and density["eligible"] and self.trace.quotas[self.step] > 0
+        if not self.trace.quotas[self.step]:
+            self.diagnostic["reason"] = "no_formal_quota"
         self.diagnostic["eligible"] = self.eligible
         if density is not None:
             self.density_updates += 2 * D["density_steps"]
-            for key in ("ess", "ess_fraction", "clip_fraction", "holdout_accuracy"):
+            for key in ("ess", "ess_fraction", "raw_ess", "clip_fraction", "holdout_accuracy"):
                 self.diagnostic[key] = density[key]
             self.ready_weights = density["weights"].to(self.config.device)
             for index, raw, weight in zip(ready, density["raw"].tolist(), density["weights"].tolist()):
@@ -176,7 +178,7 @@ class RiskRectification(SPATTA):
             current_aux_updates=self.current_aux_updates, rectification_updates=self.rectification_updates,
             eligible_batches=sum(r["eligible"] for r in self.batch_rows), density_updates=self.density_updates,
             **self.compute)
-        for key in ("ess", "ess_fraction", "clip_fraction"):
+        for key in ("ess", "ess_fraction", "raw_ess", "clip_fraction"):
             values = [r[key] for r in self.batch_rows if r[key] is not None]
             result["mean_" + key] = statistics.mean(values) if values else None
         values = [r["holdout_accuracy"] for r in self.batch_rows if r["holdout_accuracy"] is not None]

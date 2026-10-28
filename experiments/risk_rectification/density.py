@@ -38,6 +38,7 @@ def estimate_weights(memory, current):
     ess = float(weights.sum().square() / weights.square().sum())
     return {"weights": weights.float(), "raw": raw.float(),
         "ess": ess, "ess_fraction": ess / len(memory),
+        "raw_ess": float(raw.sum().square() / raw.square().sum()),
         "clip_fraction": float(((raw < D["weight_min"]) | (raw > D["weight_max"])).double().mean()),
         "holdout_accuracy": sum(heldout_accuracy) / len(heldout_accuracy),
         "eligible": ess >= D["min_ess"]}

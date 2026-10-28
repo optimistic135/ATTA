@@ -14,7 +14,7 @@ METRICS = ("Art_accuracy_pct", "Cartoon_accuracy_pct", "Sketch_accuracy_pct", "s
     "queried", "returned", "returned_pct", "cross_domain_returned", "cross_domain_pct", "pending",
     "main_updates", "candidate_updates", "gate_acceptance_pct", "aux_update_pct",
     "current_aux_updates", "rectification_updates", "eligible_batches", "density_updates",
-    "mean_ess", "mean_ess_fraction", "mean_clip_fraction", "mean_density_holdout_accuracy",
+    "mean_ess", "mean_ess_fraction", "mean_raw_ess", "mean_clip_fraction", "mean_density_holdout_accuracy",
     "mean_training_current_loss", "mean_training_residual", "mean_training_auxiliary",
     "proxy_risk_mae", "rectified_risk_mae", "current_target_accuracy_pct", "current_target_fixed_pct",
     "current_target_broken_pct", "stream_seconds", "peak_cuda_memory_mb",
