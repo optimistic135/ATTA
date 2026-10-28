@@ -74,9 +74,9 @@ class DelayedTAST(AlgBase):
     @torch.no_grad()
     def label_only_diagnostic(self, features):
         ids, supports, source, repaired, known = self.support_arrays()
-        _, plain, _ = neighbor_targets(self.head, features, supports, source, torch.zeros_like(known))
-        _, corrected, exposed = neighbor_targets(self.head, features, supports, repaired, known)
-        return plain, corrected, exposed, ids
+        plain_target, plain, _ = neighbor_targets(self.head, features, supports, source, torch.zeros_like(known))
+        repaired_target, corrected, exposed = neighbor_targets(self.head, features, supports, repaired, known)
+        return plain_target.mean(0), repaired_target.mean(0), plain, corrected, exposed
 
     @torch.enable_grad()
     def update(self, step, domain, features):
@@ -147,7 +147,7 @@ class DelayedTAST(AlgBase):
                 mask = known if self.group == GROUPS[2] else torch.zeros_like(known)
                 _, probability, _ = neighbor_targets(self.head, features, supports, labels, mask)
                 # Same snapshot/IDs: only label and authoritative-vote replacement differs.
-                plain, corrected, exposed, _ = self.label_only_diagnostic(features)
+                plain_target, repaired_target, plain, corrected, exposed = self.label_only_diagnostic(features)
                 entropy = -(source_logits.softmax(-1) * source_logits.log_softmax(-1)).sum(-1)
                 for position in range(len(images)):
                     sid = offset + position
@@ -173,8 +173,10 @@ class DelayedTAST(AlgBase):
                 truth = target.cpu()
                 predicted = probability.argmax(-1).cpu()
                 source_predicted = source_logits.argmax(-1).cpu()
-                original = plain.argmax(-1).cpu().eq(truth)
-                replacement = corrected.argmax(-1).cpu().eq(truth)
+                original = plain_target.argmax(-1).cpu().eq(truth)
+                replacement = repaired_target.argmax(-1).cpu().eq(truth)
+                plain_output_correct = plain.argmax(-1).cpu().eq(truth)
+                repaired_output_correct = corrected.argmax(-1).cpu().eq(truth)
                 correct = int(predicted.eq(truth).sum())
                 correct_total += correct
                 count_total += len(truth)
@@ -183,11 +185,13 @@ class DelayedTAST(AlgBase):
                     "released": len(release), "returned_memory": len(self.returned),
                     "label_repair_plain_correct": int(original.sum()), "label_repair_corrected_correct": int(replacement.sum()),
                     "label_repair_fixed": int((~original & replacement).sum()), "label_repair_broken": int((original & ~replacement).sum()),
+                    "label_repair_prediction_gain": int(repaired_output_correct.sum() - plain_output_correct.sum()),
                     "repair_exposed": int(exposed.sum()),
                     "online_predictions_sha256": hashlib.sha256(predicted.numpy().tobytes()).hexdigest()})
                 for i in range(len(truth)):
                     self.target_rows.append({"step": step, "domain": domain, "sample_id": offset + i,
-                        "plain_prediction": int(plain[i].argmax()), "repaired_prediction": int(corrected[i].argmax()),
+                        "plain_target_prediction": int(plain_target[i].argmax()), "repaired_target_prediction": int(repaired_target[i].argmax()),
+                        "plain_output_prediction": int(plain[i].argmax()), "repaired_output_prediction": int(corrected[i].argmax()),
                         "evaluation_label": int(truth[i]), "repair_exposed": bool(exposed[i]),
                         "online_prediction": int(predicted[i])})
                 if progress:
@@ -207,7 +211,7 @@ class DelayedTAST(AlgBase):
         for name, rows, fields in (("batches.csv", self.batch_rows, ["step", "domain", "samples"]),
             ("domains.csv", domains, ["domain", "accuracy_pct"]), ("feedback.csv", self.oracle.audit(), ["sample_id", "return_step"]),
             ("updates.csv", self.update_rows, ["step", "formal_updates"]), ("returned_labels.csv", self.feedback_rows, ["step", "sample_id", "label"]),
-            ("target_repair.csv", self.target_rows, ["step", "sample_id", "plain_prediction", "repaired_prediction"])):
+            ("target_repair.csv", self.target_rows, ["step", "sample_id", "plain_target_prediction", "repaired_target_prediction"])):
             save_rows(output / name, rows, fields)
         samples = sum(r["samples"] for r in self.batch_rows)
         result = {"method": self.group, "seed": self.config.random_seed, "delay": 100,
@@ -223,6 +227,7 @@ class DelayedTAST(AlgBase):
             "source_stream_accuracy_pct": 100 * sum(r["source_correct"] for r in self.batch_rows) / samples,
             "repair_exposure_pct": 100 * sum(r["repair_exposed"] for r in self.batch_rows) / samples,
             "label_repair_target_gain_pp": 100 * sum(r["label_repair_fixed"] - r["label_repair_broken"] for r in self.batch_rows) / samples,
+            "label_repair_prediction_gain_pp": 100 * sum(r["label_repair_prediction_gain"] for r in self.batch_rows) / samples,
             "label_repair_fixed_pct": 100 * sum(r["label_repair_fixed"] for r in self.batch_rows) / samples,
             "label_repair_broken_pct": 100 * sum(r["label_repair_broken"] for r in self.batch_rows) / samples,
             "mean_unsupervised_loss": statistics.mean(r["unsupervised_loss"] for r in self.update_rows),
