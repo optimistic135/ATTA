@@ -97,7 +97,8 @@ def summarize(output, results, seeds):
         ("Density and risk diagnostics", (("Eligible batches", "eligible_batches"), ("Mean ESS", "mean_ess"),
             ("ESS / memory", "mean_ess_fraction"), ("Raw ESS", "mean_raw_ess"), ("Clipped fraction", "mean_clip_fraction"),
             ("Holdout density acc", "mean_density_holdout_accuracy"), ("Proxy risk MAE", "proxy_risk_mae"),
-            ("Rectified risk MAE", "rectified_risk_mae"), ("Mean training residual", "mean_training_residual"))),
+            ("Rectified risk MAE", "rectified_risk_mae"), ("Mean training residual", "mean_training_residual"),
+            ("Extra bounded truth coeff", "mean_extra_bounded_truth_coefficient"))),
     )
     for title, columns in tables:
         lines += [f"## {title}", "", "| Method | " + " | ".join(n for n, _ in columns) + " |",
@@ -123,6 +124,8 @@ def summarize(output, results, seeds):
         "ESS is calculated AFTER clipping and self-normalization and does not prove overlap. High density classification accuracy "
         "indicates separability, not good calibration. Two-fold feature density fitting is not a full theoretical cross-fitting proof. "
         "Original active queries, feature-space ratios and clipping invalidate any automatic unbiasedness/double-robustness claim. "
+        "RiskRectify adds BOTH weighted bounded truth and negative weighted historical soft loss; these three arms "
+        "test their combined residual effect, not the negative term separately from stronger real supervision. "
         "No changes before first feedback are expected. Cross percentages exclude pending labels, calculated per seed. "
         "Three seeds are the independent replicates. No performance or significance claim is automatic."]
     (output / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

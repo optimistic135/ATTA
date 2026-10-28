@@ -128,6 +128,7 @@ class RiskRectification(SPATTA):
         truth = F.cross_entropy(truth_logits, truth_labels)
         loss = true_coef * truth + (pseudo_coef * pseudo if pseudo is not None else 0)
         current_loss = residual = auxiliary = None
+        extra_truth_coefficient = 0.0
         if self.eligible and self.study_group != GROUPS[0]:
             current_loss = soft_loss(bounded_log_probability(model(self.current_images)), self.current_targets).mean()
             auxiliary = current_loss
@@ -137,6 +138,7 @@ class RiskRectification(SPATTA):
                 true_bounded = -logp.gather(1, truth_labels[:, None]).squeeze(1)
                 historical_soft = soft_loss(logp, self.ready_targets[positions])
                 residual = (self.ready_weights[positions] * (true_bounded - historical_soft)).mean()
+                extra_truth_coefficient = D["eta"] * float(self.ready_weights[positions].mean())
                 auxiliary = current_loss + residual
                 self.rectification_updates += 1
             loss = loss + D["eta"] * auxiliary
@@ -144,6 +146,7 @@ class RiskRectification(SPATTA):
         self.loss_rows.append({"step": self.step, "iteration": self.formal_by_step[self.step],
             "eligible": self.eligible, "true_coefficient": true_coef, "historical_coefficient": pseudo_coef,
             "eta": D["eta"] if auxiliary is not None else 0.0,
+            "extra_bounded_truth_coefficient": extra_truth_coefficient,
             "current_loss": float(current_loss.detach()) if current_loss is not None else None,
             "residual": float(residual.detach()) if residual is not None else None,
             "auxiliary": float(auxiliary.detach()) if auxiliary is not None else None})
@@ -186,6 +189,8 @@ class RiskRectification(SPATTA):
         for key in ("current_loss", "residual", "auxiliary"):
             values = [r[key] for r in self.loss_rows if r[key] is not None]
             result["mean_training_" + key] = statistics.mean(values) if values else None
+        values = [r["extra_bounded_truth_coefficient"] for r in self.loss_rows]
+        result["mean_extra_bounded_truth_coefficient"] = statistics.mean(values) if values else None
         for key, field in (("proxy_risk_mae", "proxy_risk"), ("rectified_risk_mae", "rectified_risk")):
             rows = [r for r in self.batch_rows if r["eligible"] and r[field] is not None]
             n = sum(r["samples"] for r in rows)
