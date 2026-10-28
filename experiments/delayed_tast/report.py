@@ -59,6 +59,7 @@ def summarize(output, results, seeds):
                     row = {"seed": seed, "method": group, "phase": phase, "domain": domain, "samples": n}
                     for key, field in (("plain_target_accuracy_pct", "label_repair_plain_correct"),
                         ("repaired_target_accuracy_pct", "label_repair_corrected_correct"),
+                        ("actual_training_target_accuracy_pct", "training_target_correct"),
                         ("fixed_pct", "label_repair_fixed"), ("broken_pct", "label_repair_broken"),
                         ("exposure_pct", "repair_exposed"), ("label_only_prediction_gain_pp", "label_repair_prediction_gain")):
                         row[key] = 100 * sum(int(r[field]) for r in rows) / n if n else None
@@ -90,6 +91,7 @@ def summarize(output, results, seeds):
         ("Waiting phase and label repair diagnostics", (("Source before feedback (%)", "source_before_feedback_accuracy_pct"),
             ("Waiting gain vs source (pp)", "waiting_gain_vs_source_pp"), ("Repaired labels", "repaired_labels"),
             ("Wrong source labels repaired", "repaired_wrong_source_labels"), ("Truth neighbor exposure (%)", "repair_exposure_pct"),
+            ("Actual training target acc (%)", "actual_training_target_accuracy_pct"),
             ("Label-only target gain (pp)", "label_repair_target_gain_pp"),
             ("Label-only prediction gain (pp)", "label_repair_prediction_gain_pp"))),
         ("Feedback and costs", (("Queried", "queried"), ("Returned", "returned"), ("Returned (%)", "returned_pct"),
@@ -119,6 +121,8 @@ def summarize(output, results, seeds):
         "the old SP per-batch optimizer quotas are NOT reused. Equal steps do not imply equal FLOPs. "
         "Label-only diagnostics compare unrepaired/repaired target votes and soft outputs using the SAME current head, "
         "features and support IDs before release/update. They are not cross-trajectory gains or proof of future benefit. "
+        "Actual training targets are separately scored after current support insertion and release; evaluation labels "
+        "never determine these targets. Truth-neighbor exposure counts direct neighbors, not indirect prototype effects. "
         "Repair changes prototypes, target votes and inference votes jointly; these three arms do not separate those channels. "
         "No unseen current/future truth enters training, pruning, support retention or queries. "
         "First return batch belongs to before-feedback. Cross percentages exclude pending labels, computed per seed. "

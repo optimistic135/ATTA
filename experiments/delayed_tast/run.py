@@ -62,8 +62,8 @@ def worker(args):
     algorithm = DelayedTAST(config, args.group, trace)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     dump_json(args.output_dir / "settings.json", {"method": args.group, "seed": args.seed, "delay": 100,
-        "defaults": DEFAULTS, "reference_hashes": trace.hashes, "simatta": dict(config.atta.SimATTA),
-        "train_batch_size": config.train.train_bs, "torch_version": torch.__version__,
+        "defaults": DEFAULTS, "reference_hashes": trace.hashes, "source_simatta_config_not_used_for_adaptation": dict(config.atta.SimATTA),
+        "source_config_train_batch_size_not_used": config.train.train_bs, "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda})
     def progress(event):
         emit_progress({**event, "domain": f"{args.group}/{event['domain']}"})

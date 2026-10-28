@@ -13,7 +13,8 @@ METRICS = ("Art_accuracy_pct", "Cartoon_accuracy_pct", "Sketch_accuracy_pct", "s
     "source_stream_accuracy_pct", "source_before_feedback_accuracy_pct", "waiting_gain_vs_source_pp",
     "queried", "returned", "returned_pct", "cross_domain_returned", "cross_domain_pct", "pending",
     "formal_updates", "replay_updates", "replay_draws", "replay_unique_labels", "repaired_labels",
-    "repaired_wrong_source_labels", "repair_exposure_pct", "label_repair_target_gain_pp", "label_repair_prediction_gain_pp",
+    "repaired_wrong_source_labels", "repair_exposure_pct", "actual_training_target_accuracy_pct",
+    "label_repair_target_gain_pp", "label_repair_prediction_gain_pp",
     "label_repair_fixed_pct", "label_repair_broken_pct", "mean_unsupervised_loss", "mean_supervised_loss",
     "encoder_forward_calls", "encoder_forward_images", "encoder_backward_calls", "head_forward_calls",
     "head_backward_calls", "stream_seconds", "peak_cuda_memory_mb")

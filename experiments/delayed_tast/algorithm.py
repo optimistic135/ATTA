@@ -24,6 +24,8 @@ class DelayedTAST(AlgBase):
     def __init__(self, config, group, trace):
         if group not in GROUPS:
             raise ValueError("Unknown delayed TAST arm")
+        if D["steps_per_batch"] != 1:
+            raise ValueError("This minimal protocol supports exactly one head step per batch")
         super().__init__(config)
         self.group, self.trace = group, trace
         self.experiment = EXPERIMENTS["PACS"]
@@ -85,7 +87,9 @@ class DelayedTAST(AlgBase):
         mask = known if self.group == GROUPS[2] else torch.zeros_like(known)
         for sid in ids:
             self.support_hash.update(f"{step}:{sid};".encode())
-        targets, _, _ = neighbor_targets(self.head, features, supports, labels, mask)
+        targets, _, exposure = neighbor_targets(self.head, features, supports, labels, mask)
+        self.training_target = targets.mean(0).detach().cpu()
+        self.training_exposure = exposure.detach().cpu()
         ready = sorted(self.returned)
         generator = torch.Generator().manual_seed(self.config.random_seed + 9000011 * step + 37)
         draw = [ready[int(i)] for i in torch.randint(len(ready), (D["truth_batch_size"],), generator=generator)] if ready else []
@@ -182,6 +186,8 @@ class DelayedTAST(AlgBase):
                 count_total += len(truth)
                 self.batch_rows.append({"step": step, "domain": domain, "samples": len(truth), "pre_correct": correct,
                     "source_correct": int(source_predicted.eq(truth).sum()), "before_feedback": before_feedback,
+                    "training_target_correct": int(self.training_target.argmax(-1).eq(truth).sum()),
+                    "training_truth_neighbor_exposure": int(self.training_exposure.sum()),
                     "released": len(release), "returned_memory": len(self.returned),
                     "label_repair_plain_correct": int(original.sum()), "label_repair_corrected_correct": int(replacement.sum()),
                     "label_repair_fixed": int((~original & replacement).sum()), "label_repair_broken": int((original & ~replacement).sum()),
@@ -192,6 +198,7 @@ class DelayedTAST(AlgBase):
                     self.target_rows.append({"step": step, "domain": domain, "sample_id": offset + i,
                         "plain_target_prediction": int(plain_target[i].argmax()), "repaired_target_prediction": int(repaired_target[i].argmax()),
                         "plain_output_prediction": int(plain[i].argmax()), "repaired_output_prediction": int(corrected[i].argmax()),
+                        "actual_training_target_prediction": int(self.training_target[i].argmax()),
                         "evaluation_label": int(truth[i]), "repair_exposed": bool(exposed[i]),
                         "online_prediction": int(predicted[i])})
                 if progress:
@@ -225,6 +232,7 @@ class DelayedTAST(AlgBase):
             "replay_unique_labels": len(self.replayed), "repaired_labels": len(self.returned) if self.group == GROUPS[2] else 0,
             "repaired_wrong_source_labels": sum(r["source_wrong"] for r in self.feedback_rows) if self.group == GROUPS[2] else 0,
             "source_stream_accuracy_pct": 100 * sum(r["source_correct"] for r in self.batch_rows) / samples,
+            "actual_training_target_accuracy_pct": 100 * sum(r["training_target_correct"] for r in self.batch_rows) / samples,
             "repair_exposure_pct": 100 * sum(r["repair_exposed"] for r in self.batch_rows) / samples,
             "label_repair_target_gain_pp": 100 * sum(r["label_repair_fixed"] - r["label_repair_broken"] for r in self.batch_rows) / samples,
             "label_repair_prediction_gain_pp": 100 * sum(r["label_repair_prediction_gain"] for r in self.batch_rows) / samples,
